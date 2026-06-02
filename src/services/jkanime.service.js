@@ -13,7 +13,7 @@ const HTTP_HEADERS = {
   "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
 };
 
-const { extractStream } = require("../utils/stream-extractor");
+const { extractStream } = require("../utils/stream-extractor.js");
 
 async function getStreams(url) {
     return await extractStream(url);
@@ -21,7 +21,7 @@ async function getStreams(url) {
 
 module.exports = { getStreams };
 
-const { extractStream } = require("../utils/stream-extractor");
+const { extractStream } = require("../utils/stream-extractor.js");
 
 async function getEpisodeLinks(url) {
 
