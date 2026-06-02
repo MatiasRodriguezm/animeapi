@@ -17,6 +17,7 @@ function asyncHandler(handler) {
   };
 }
 
+
 router.use(requireApiKey, dailyRateLimit);
 
 router.get(
