@@ -13,55 +13,6 @@ const HTTP_HEADERS = {
   "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
 };
 
-const { extractStream } = require("../utils/stream-extractor.js");
-
-async function getStreams(url) {
-    return await extractStream(url);
-}
-
-module.exports = { getStreams };
-
-const { extractStream } = require("../utils/stream-extractor.js");
-
-async function getEpisodeLinks(url) {
-
-    const data = await scrapeEpisode(url);
-
-    const streams = [];
-
-    for (const server of data.servers) {
-
-        if (!server.url) continue;
-
-        // ❌ ignorar embeds basura
-        if (server.url.includes("/e/")) {
-
-            try {
-                const extracted = await extractStream(server.url);
-
-                for (const url of extracted) {
-                    streams.push({
-                        server: server.server,
-                        url
-                    });
-                }
-
-            } catch (e) {
-                console.log("fail extractor", server.server);
-            }
-
-        } else {
-            // ✅ ya es directo
-            streams.push({
-                server: server.server,
-                url: server.url
-            });
-        }
-    }
-
-    return { data: streams };
-}
-
 async function fetchHtml(url) {
   try {
     const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
