@@ -179,8 +179,55 @@ async function getEpisodeLinks(urlCandidate, includeMega, excludeServers) {
   };
 }
 
+async function getLatestEpisodes(domainCandidate) {
+  const forcedProvider = findProviderByDomain(domainCandidate) || findProviderById(domainCandidate);
+  const providersToTry = forcedProvider ? [forcedProvider] : PROVIDERS;
+
+  let lastEmpty = null;
+  const errors = [];
+
+  for (const provider of providersToTry) {
+    if (typeof provider.service.getLatestEpisodes !== 'function') continue;
+
+    try {
+      const result = await provider.service.getLatestEpisodes(provider.domains[0]);
+      const count = result?.data?.count ?? 0;
+      if (count > 0 || forcedProvider) {
+        return {
+          ...result,
+          source: result?.source || provider.id,
+        };
+      }
+
+      if (!lastEmpty) {
+        lastEmpty = {
+          ...result,
+          source: result?.source || provider.id,
+        };
+      }
+    } catch (error) {
+      errors.push({ provider: provider.id, error });
+    }
+  }
+
+  if (lastEmpty) {
+    return lastEmpty;
+  }
+
+  if (errors.length > 0 && forcedProvider) {
+    throw errors[0].error;
+  }
+  
+  if (errors.length === providersToTry.length && errors[0]?.error) {
+    throw errors[0].error;
+  }
+
+  throw new ApiError(502, "No se pudo completar la busqueda de ultimos episodios en proveedores");
+}
+
 module.exports = {
   searchAnime,
   getAnimeInfo,
   getEpisodeLinks,
+  getLatestEpisodes,
 };

@@ -284,8 +284,65 @@ async function getEpisodeLinks(urlCandidate, includeMega = false, excludeServers
   };
 }
 
+async function getLatestEpisodes(domainCandidate) {
+  const domain = (domainCandidate || DEFAULT_DOMAIN).toString().trim();
+  const searchUrl = `https://${domain}/`;
+  const html = await fetchHtml(searchUrl);
+
+  const $ = cheerio.load(html);
+  const results = [];
+
+  $("a[href*='-episodio-']").each((_, element) => {
+    const el = $(element);
+    const url = el.attr("href");
+    const title = el.find(".title, h2, h3, p").text().trim() || el.text().trim();
+    const image = el.find("img").attr("data-src") || el.find("img").attr("src");
+
+    if (!url || !title || title === "Ver ahora") {
+      // Monoschinos sometimes has 'Ver ahora' for title if we pick the wrong element
+      // We'll try to extract title from the url slug if it's generic
+    }
+
+    const fullUrl = url.startsWith("http") ? url : `https://${domain}${url}`;
+    const slug = slugFromUrl(fullUrl) || "";
+    const number = parseEpisodeNumberFromUrl(fullUrl);
+    
+    // Better title fallback
+    let finalTitle = title;
+    if (finalTitle === "Ver ahora" || !finalTitle) {
+       finalTitle = slug.replace(/-/g, " ");
+    }
+
+    results.push({
+      id: null,
+      title: finalTitle,
+      episode: number,
+      slug,
+      url: fullUrl,
+      image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
+    });
+  });
+  
+  // Dedup by url
+  const seen = new Set();
+  const deduped = [];
+  for (const item of results) {
+     if (!seen.has(item.url)) {
+        seen.add(item.url);
+        deduped.push(item);
+     }
+  }
+
+  return {
+    success: true,
+    data: { results: deduped, count: deduped.length },
+    source: "monoschinos",
+  };
+}
+
 module.exports = {
   searchAnime,
   getAnimeInfo,
   getEpisodeLinks,
+  getLatestEpisodes,
 };

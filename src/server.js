@@ -39,8 +39,8 @@ app.get("/", (_req, res) => {
     message: "Anime1v API backend reconstruido",
     version: "1.0.0",
     endpoints: {
-      modern: ["/api/v1/anime/search", "/api/v1/anime/info", "/api/v1/anime/episode"],
-      legacy: ["/api/anime1v/search", "/api/anime1v/info", "/api/anime1v/episode"],
+      modern: ["/api/v1/anime/search", "/api/v1/anime/info", "/api/v1/anime/episode", "/api/v1/anime/latest-episodes"],
+      legacy: ["/api/anime1v/search", "/api/anime1v/info", "/api/anime1v/episode", "/api/anime1v/latest-episodes"],
     },
   });
 });

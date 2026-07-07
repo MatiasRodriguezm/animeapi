@@ -720,8 +720,62 @@ async function getEpisodeLinks(urlCandidate, includeMegaRaw, excludeServersRaw) 
   };
 }
 
+async function getLatestEpisodes(domainCandidate) {
+  const domain = (domainCandidate || DEFAULT_DOMAIN).toString().trim();
+  const searchUrl = `https://${domain}/`;
+  const html = await fetchHtml(searchUrl);
+
+  const $ = cheerio.load(html);
+  const results = [];
+
+  const addEps = (selector) => {
+    $(selector).each((_, element) => {
+      const a = $(element);
+      const url = a.attr("href");
+      
+      // Match URLs that look like anime episode links (end with a number, optional slash)
+      if (url && url.match(/\/\d+\/?$/) && url.includes(domain)) {
+        const title = a.find("h5, .title, p").text().trim() || a.text().trim();
+        const image = a.find("img").attr("src");
+        
+        const fullUrl = url.startsWith("http") ? url : `https://${domain}${url}`;
+        const segments = new URL(fullUrl).pathname.split("/").filter(Boolean);
+        const slug = segments[segments.length - 2] || "";
+        const number = parseEpisodeNumberFromUrl(fullUrl);
+
+        results.push({
+          id: null,
+          title: title.replace(/\n/g, "").trim(),
+          episode: number,
+          slug,
+          url: fullUrl,
+          image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
+        });
+      }
+    });
+  };
+
+  addEps("a");
+
+  const seen = new Set();
+  const deduped = [];
+  for (const item of results) {
+     if (!seen.has(item.url)) {
+        seen.add(item.url);
+        deduped.push(item);
+     }
+  }
+
+  return {
+    success: true,
+    data: { results: deduped, count: deduped.length },
+    source: "jkanime",
+  };
+}
+
 module.exports = {
   searchAnime,
   getAnimeInfo,
   getEpisodeLinks,
+  getLatestEpisodes,
 };

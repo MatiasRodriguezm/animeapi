@@ -328,8 +328,46 @@ async function getEpisodeLinks(urlCandidate) {
   };
 }
 
+async function getLatestEpisodes(domainCandidate) {
+  const domain = (domainCandidate || DEFAULT_DOMAIN).toString().trim();
+  const searchUrl = `https://${domain}/`;
+  const html = await fetchHtml(searchUrl);
+
+  const $ = cheerio.load(html);
+  const results = [];
+
+  $(".episodes li article.episode, ul.episodes li a").each((_, element) => {
+    const el = $(element);
+    const url = el.attr("href") || el.find("a").attr("href");
+    const title = el.find("h3.title").text().trim();
+    const image = el.find("img").attr("src");
+
+    if (!url || !title) return;
+
+    const fullUrl = url.startsWith("http") ? url : `https://${domain}${url}`;
+    const slug = slugFromUrl(fullUrl) || "";
+    const number = parseEpisodeNumberFromUrl(fullUrl);
+
+    results.push({
+      id: null,
+      title,
+      episode: number,
+      slug,
+      url: fullUrl,
+      image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
+    });
+  });
+
+  return {
+    success: true,
+    data: { results, count: results.length },
+    source: "tioanime",
+  };
+}
+
 module.exports = {
   searchAnime,
   getAnimeInfo,
   getEpisodeLinks,
+  getLatestEpisodes,
 };

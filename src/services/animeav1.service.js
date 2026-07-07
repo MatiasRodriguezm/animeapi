@@ -964,8 +964,58 @@ async function getEpisodeLinks(urlCandidate, includeMegaRaw, excludeServersRaw) 
   };
 }
 
+async function getLatestEpisodes(domainCandidate) {
+  const domain = detectDomain(domainCandidate || DEFAULT_DOMAIN);
+  const searchUrl = `https://${domain}/`;
+  const html = await fetchHtml(searchUrl);
+
+  const $ = cheerio.load(html);
+  const results = [];
+
+  $("a").each((_, element) => {
+    const el = $(element);
+    const url = el.attr("href");
+    
+    // Animeav1 episode urls look like: /media/anime-name/1
+    if (url && url.match(/\/media\/[^\/]+\/\d+$/)) {
+      const title = el.text().trim() || "AnimeAV1 Episodio";
+      const image = el.find("img").attr("src");
+
+      const fullUrl = url.startsWith("http") ? url : `https://${domain}${url}`;
+      const segments = new URL(fullUrl).pathname.split("/").filter(Boolean);
+      const slug = segments[segments.length - 2] || "";
+      const number = parseEpisodeNumberFromUrl(fullUrl);
+
+      results.push({
+        id: null,
+        title: title.replace(/\n/g, "").trim(),
+        episode: number,
+        slug,
+        url: fullUrl,
+        image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
+      });
+    }
+  });
+
+  const seen = new Set();
+  const deduped = [];
+  for (const item of results) {
+     if (!seen.has(item.url)) {
+        seen.add(item.url);
+        deduped.push(item);
+     }
+  }
+
+  return {
+    success: true,
+    data: { results: deduped, count: deduped.length },
+    source: "animeav1",
+  };
+}
+
 module.exports = {
   searchAnime,
   getAnimeInfo,
   getEpisodeLinks,
+  getLatestEpisodes,
 };
