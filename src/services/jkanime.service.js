@@ -261,20 +261,44 @@ function extractVarLiteral(html, varName) {
   return extractBalancedSection(slice, firstBracketIndex, openChar, closeChar);
 }
 
-function extractVideoIframeUrls(html) {
-  const urls = [];
-  const videoPattern = /video\[\d+\]\s*=\s*(['"])([\s\S]*?)\1/g;
+function extractVideoIframes(html) {
+  const $ = cheerio.load(html);
+  const serverNamesById = {};
+  const serverLangById = {};
+
+  $(".bg-servers a").each((_, el) => {
+    const dataId = $(el).attr("data-id");
+    const name = $(el).text().trim();
+    const classList = $(el).attr("class") || "";
+    if (dataId !== undefined && name) {
+      serverNamesById[dataId] = name;
+      const langMatch = classList.match(/lg_(\d+)/);
+      if (langMatch) {
+        serverLangById[dataId] = langMatch[1];
+      }
+    }
+  });
+
+  const iframes = [];
+  const videoPattern = /video\[(\d+)\]\s*=\s*(['"])([\s\S]*?)\2/g;
   let match = null;
 
   while ((match = videoPattern.exec(html))) {
-    const fragment = match[2];
+    const index = match[1];
+    const fragment = match[3];
     const srcMatch = fragment.match(/src=['"]([^'"]+)['"]/i);
     if (srcMatch && srcMatch[1]) {
-      urls.push(srcMatch[1]);
+      const serverName = serverNamesById[index] || `Server ${index}`;
+      const lang = serverLangById[index] || "1";
+      iframes.push({
+        url: srcMatch[1],
+        serverName,
+        lang,
+      });
     }
   }
 
-  return urls;
+  return iframes;
 }
 
 function decodeBase64(value) {
@@ -290,6 +314,13 @@ function decodeBase64(value) {
 }
 
 function normalizeVariantKey(value) {
+  if (value === 1 || value === "1") {
+    return "SUB";
+  }
+  if (value === 2 || value === "2") {
+    return "DUB";
+  }
+
   const normalized = normalizeToken(value);
   if (!normalized) {
     return "SUB";
@@ -299,7 +330,11 @@ function normalizeVariantKey(value) {
     return "SUB";
   }
 
-  return "DUB";
+  if (normalized.includes("lat") || normalized.includes("dub") || normalized.includes("esp") || normalized.includes("cast")) {
+    return "DUB";
+  }
+
+  return "SUB";
 }
 
 function parseSearchResultsFromHtml(html, domain) {
@@ -678,11 +713,12 @@ async function getEpisodeLinks(urlCandidate, includeMegaRaw, excludeServersRaw) 
     }
   }
 
-  const iframeUrls = extractVideoIframeUrls(html);
-  for (const url of iframeUrls) {
-    const link = buildLinkRecord("JKPlayer", url, null);
+  const iframes = extractVideoIframes(html);
+  for (const item of iframes) {
+    const variant = normalizeVariantKey(item.lang);
+    const link = buildLinkRecord(item.serverName, item.url, null);
     if (link) {
-      pushDeduped(streamLinks.SUB, link);
+      pushDeduped(streamLinks[variant], link);
     }
   }
 
