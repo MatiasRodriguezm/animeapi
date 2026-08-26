@@ -336,21 +336,28 @@ async function getLatestEpisodes(domainCandidate) {
   const $ = cheerio.load(html);
   const results = [];
 
-  $(".episodes li article.episode, ul.episodes li a").each((_, element) => {
+  $(".episodes article.episode").each((_, element) => {
     const el = $(element);
-    const url = el.attr("href") || el.find("a").attr("href");
-    const title = el.find("h3.title").text().trim();
+    const a = el.find("a").first();
+    const url = a.attr("href") || el.attr("href");
+    const rawTitle = el.find("h3.title").text().trim() || a.text().trim();
     const image = el.find("img").attr("src");
 
-    if (!url || !title) return;
+    if (!url || !rawTitle) return;
 
     const fullUrl = url.startsWith("http") ? url : `https://${domain}${url}`;
     const slug = slugFromUrl(fullUrl) || "";
     const number = parseEpisodeNumberFromUrl(fullUrl);
 
+    // Clean title: remove trailing episode number if present
+    let title = rawTitle;
+    if (number) {
+      title = title.replace(new RegExp(`\\s+${number}$`), "").trim();
+    }
+
     results.push({
       id: null,
-      title,
+      title: title || rawTitle,
       episode: number,
       slug,
       url: fullUrl,
@@ -358,9 +365,19 @@ async function getLatestEpisodes(domainCandidate) {
     });
   });
 
+  const seen = new Set();
+  const deduped = [];
+  for (const item of results) {
+    const key = `${item.slug}-${item.episode}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(item);
+    }
+  }
+
   return {
     success: true,
-    data: { results, count: results.length },
+    data: { results: deduped, count: deduped.length },
     source: "tioanime",
   };
 }

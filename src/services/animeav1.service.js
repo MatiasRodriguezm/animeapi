@@ -972,23 +972,34 @@ async function getLatestEpisodes(domainCandidate) {
   const $ = cheerio.load(html);
   const results = [];
 
-  $("a").each((_, element) => {
+  $("a[href*='/media/']").each((_, element) => {
     const el = $(element);
-    const url = el.attr("href");
+    const rawUrl = el.attr("href");
     
     // Animeav1 episode urls look like: /media/anime-name/1
-    if (url && url.match(/\/media\/[^\/]+\/\d+$/)) {
-      const title = el.text().trim() || "AnimeAV1 Episodio";
-      const image = el.find("img").attr("src");
-
-      const fullUrl = url.startsWith("http") ? url : `https://${domain}${url}`;
+    if (rawUrl && rawUrl.match(/\/media\/[^\/]+\/\d+$/)) {
+      const fullUrl = rawUrl.startsWith("http") ? rawUrl : `https://${domain}${rawUrl}`;
       const segments = new URL(fullUrl).pathname.split("/").filter(Boolean);
       const slug = segments[segments.length - 2] || "";
       const number = parseEpisodeNumberFromUrl(fullUrl);
 
+      // Clean title
+      let rawTitle = el.text().trim() || el.attr("title") || "";
+      rawTitle = rawTitle.replace(/^Ver\s+/i, "").replace(new RegExp(`\\s+${number}$`), "").trim();
+      if (!rawTitle) {
+        rawTitle = slug.replace(/-/g, " ");
+      }
+
+      // Find image inside <a> or in parent container
+      let imgEl = el.find("img");
+      if (!imgEl.length) {
+        imgEl = el.closest(".relative, .group, article, li, div").find("img");
+      }
+      const image = imgEl.attr("src") || imgEl.attr("data-src") || imgEl.attr("srcset") || null;
+
       results.push({
         id: null,
-        title: title.replace(/\n/g, "").trim(),
+        title: rawTitle.replace(/\n/g, "").trim(),
         episode: number,
         slug,
         url: fullUrl,
@@ -1000,10 +1011,11 @@ async function getLatestEpisodes(domainCandidate) {
   const seen = new Set();
   const deduped = [];
   for (const item of results) {
-     if (!seen.has(item.url)) {
-        seen.add(item.url);
-        deduped.push(item);
-     }
+    const key = `${item.slug}-${item.episode}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(item);
+    }
   }
 
   return {

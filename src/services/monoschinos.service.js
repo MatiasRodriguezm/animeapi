@@ -292,45 +292,86 @@ async function getLatestEpisodes(domainCandidate) {
   const $ = cheerio.load(html);
   const results = [];
 
-  $("a[href*='-episodio-']").each((_, element) => {
+  // Target grid cards for latest episodes, excluding hero-content / banner
+  $(".grid a[href*='-episodio-'], .row .col-6 a[href*='-episodio-'], .card-wrap a[href*='-episodio-']").each((_, element) => {
     const el = $(element);
-    const url = el.attr("href");
-    const title = el.find(".title, h2, h3, p").text().trim() || el.text().trim();
-    const image = el.find("img").attr("data-src") || el.find("img").attr("src");
+    // Ignore hero / banner / carousel
+    if (el.closest(".hero-content, .hero, #hero, [class*='hero']").length > 0) return;
+    if (el.hasClass("slider-show") || el.text().trim() === "Ver ahora") return;
 
-    if (!url || !title || title === "Ver ahora") {
-      // Monoschinos sometimes has 'Ver ahora' for title if we pick the wrong element
-      // We'll try to extract title from the url slug if it's generic
-    }
+    const url = el.attr("href");
+    if (!url) return;
 
     const fullUrl = url.startsWith("http") ? url : `https://${domain}${url}`;
-    const slug = slugFromUrl(fullUrl) || "";
-    const number = parseEpisodeNumberFromUrl(fullUrl);
-    
-    // Better title fallback
-    let finalTitle = title;
-    if (finalTitle === "Ver ahora" || !finalTitle) {
-       finalTitle = slug.replace(/-/g, " ");
+    const segments = new URL(fullUrl).pathname.split("/").filter(Boolean);
+    const lastSegment = segments[segments.length - 1] || "";
+    const match = lastSegment.match(/-episodio-(\d+)$/);
+    const number = match ? Number(match[1]) : null;
+    const slug = lastSegment.replace(/-episodio-\d+$/, "");
+
+    let title = el.find(".title, h2, h3, h5, p").text().trim() || el.text().trim();
+    if (!title || title === "Ver ahora") {
+      title = slug.replace(/-/g, " ");
     }
+
+    const imgEl = el.find("img");
+    const image = imgEl.attr("data-src") || imgEl.attr("src") || null;
 
     results.push({
       id: null,
-      title: finalTitle,
+      title,
       episode: number,
       slug,
       url: fullUrl,
       image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
     });
   });
-  
-  // Dedup by url
+
+  // Fallback if structured grid not matched
+  if (results.length === 0) {
+    $("a[href*='-episodio-']").each((_, element) => {
+      const el = $(element);
+      if (el.closest(".hero-content, .hero, [class*='hero']").length > 0) return;
+      if (el.hasClass("slider-show") || el.text().trim() === "Ver ahora") return;
+
+      const url = el.attr("href");
+      if (!url) return;
+
+      const fullUrl = url.startsWith("http") ? url : `https://${domain}${url}`;
+      const segments = new URL(fullUrl).pathname.split("/").filter(Boolean);
+      const lastSegment = segments[segments.length - 1] || "";
+      const match = lastSegment.match(/-episodio-(\d+)$/);
+      const number = match ? Number(match[1]) : null;
+      const slug = lastSegment.replace(/-episodio-\d+$/, "");
+
+      let title = el.find(".title, h2, h3, h5, p").text().trim() || el.text().trim();
+      if (!title || title === "Ver ahora") {
+        title = slug.replace(/-/g, " ");
+      }
+
+      const imgEl = el.find("img");
+      const image = imgEl.attr("data-src") || imgEl.attr("src") || null;
+
+      results.push({
+        id: null,
+        title,
+        episode: number,
+        slug,
+        url: fullUrl,
+        image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
+      });
+    });
+  }
+
+  // Dedup by slug and episode number
   const seen = new Set();
   const deduped = [];
   for (const item of results) {
-     if (!seen.has(item.url)) {
-        seen.add(item.url);
-        deduped.push(item);
-     }
+    const key = `${item.slug}-${item.episode}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(item);
+    }
   }
 
   return {
