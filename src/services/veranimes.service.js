@@ -459,13 +459,15 @@ async function getEpisodeLinks(urlCandidate, includeMega = true, excludeServers 
   const filteredDwnSub = filterLinksByServers(downloadLinks.SUB, excludedTokens);
   const filteredDwnDub = filterLinksByServers(downloadLinks.DUB, excludedTokens);
 
-  // Deduplicate by URL (single distinct entry per unique stream/download URL)
+  // Deduplicate by server name + URL (preserves distinct servers like Filemoon and Byse while removing duplicate mirror options)
   const dedupLinks = (arr) => {
     const seen = new Set();
     const res = [];
     for (const item of arr) {
-      if (!item.url || seen.has(item.url)) continue;
-      seen.add(item.url);
+      if (!item.url) continue;
+      const key = `${item.server || ""}|${item.url}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       res.push(item);
     }
     return res;
