@@ -67,6 +67,10 @@ async function fetchHtmlWithPuppeteer(url, referer = null) {
   }
 }
 
+const CF_PROXY_URL =
+  process.env.ANIMED23_PROXY_URL ||
+  "https://proxy-anime.elsodaestacio.workers.dev/?url=";
+
 const SCRAPER_USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
@@ -80,7 +84,29 @@ async function fetchHtml(url, referer = null) {
   const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 12000);
   let lastError = null;
 
-  // Tier 1: Try with rotating User-Agents (including crawler/social bots that Cloudflare WAF whitelists)
+  // Tier 1: Cloudflare Worker Proxy (100% reliable bypass for cloud environments like Render)
+  if (CF_PROXY_URL) {
+    try {
+      const proxyTarget = `${CF_PROXY_URL}${encodeURIComponent(url)}`;
+      const response = await axios.get(proxyTarget, {
+        timeout,
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+
+      if (
+        typeof response.data === "string" &&
+        response.data.length > 200 &&
+        !response.data.includes("Just a moment...") &&
+        !response.data.includes("cf-browser-verification")
+      ) {
+        return response.data;
+      }
+    } catch (proxyError) {
+      lastError = proxyError;
+    }
+  }
+
+  // Tier 2: Direct request with rotating User-Agents (for local / unblocked environments)
   for (const ua of SCRAPER_USER_AGENTS) {
     try {
       const headers = {
@@ -117,7 +143,7 @@ async function fetchHtml(url, referer = null) {
     }
   }
 
-  // Tier 2: Try native globalThis.fetch (HTTP/2 with modern TLS ALPN)
+  // Tier 3: Native globalThis.fetch (HTTP/2 with modern TLS ALPN)
   try {
     const fetchHeaders = {
       "User-Agent": SCRAPER_USER_AGENTS[1],
@@ -142,7 +168,7 @@ async function fetchHtml(url, referer = null) {
     lastError = fetchErr;
   }
 
-  // Tier 3: Puppeteer fallback if available
+  // Tier 4: Puppeteer fallback if available in environment
   try {
     return await fetchHtmlWithPuppeteer(url, referer);
   } catch (_puppeteerError) {
