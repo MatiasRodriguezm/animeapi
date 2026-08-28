@@ -7,6 +7,7 @@ const hentailaService = require("./hentaila.service");
 const tioanimeService = require("./tioanime.service");
 const monoschinosService = require("./monoschinos.service");
 const veranimesService = require("./veranimes.service");
+const animed23Service = require("./animed23.service");
 
 const DEFAULT_ANIME_DOMAIN = process.env.DEFAULT_ANIME_DOMAIN || "animeav1.com";
 
@@ -52,6 +53,12 @@ const PROVIDERS = [
     label: "VerAnimes",
     domains: ["veranimes.net", "www.veranimes.net", "wwv.veranimes.net"],
     service: veranimesService,
+  },
+  {
+    id: "animed23",
+    label: "AnimeD23",
+    domains: ["animed23.com", "www.animed23.com"],
+    service: animed23Service,
   },
 ];
 
