@@ -205,9 +205,9 @@ function parseEpisodeNumberFromUrl(urlCandidate) {
     const segments = clean.split("/").filter(Boolean);
     const lastSegment = segments[segments.length - 1] || "";
     const match =
-      lastSegment.match(/-ep-(\d+)$/i) ||
-      lastSegment.match(/-capitulo-(\d+)$/i) ||
-      lastSegment.match(/-(\d+)$/);
+      lastSegment.match(/-ep-(\d+)(?:-[a-z0-9-]+)?$/i) ||
+      lastSegment.match(/-capitulo-(\d+)(?:-[a-z0-9-]+)?$/i) ||
+      lastSegment.match(/-(\d+)(?:-[a-z0-9-]+)?$/);
     return match ? Number(match[1]) : null;
   } catch (_) {
     return null;
@@ -224,9 +224,9 @@ function slugFromUrl(urlCandidate) {
       return lastSegment;
     }
     return lastSegment
-      .replace(/-ep-\d+$/i, "")
-      .replace(/-capitulo-\d+$/i, "")
-      .replace(/-\d+$/, "");
+      .replace(/-ep-\d+.*$/i, "")
+      .replace(/-capitulo-\d+.*$/i, "")
+      .replace(/-\d+.*$/, "");
   } catch (_) {
     return null;
   }
