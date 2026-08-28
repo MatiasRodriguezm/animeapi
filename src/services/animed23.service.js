@@ -25,92 +25,132 @@ async function getPuppeteerBrowser() {
 }
 
 async function fetchHtmlWithPuppeteer(url, referer = null) {
-  const browser = await getPuppeteerBrowser();
-  const page = await browser.newPage();
-
   try {
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    );
+    const browser = await getPuppeteerBrowser();
+    const page = await browser.newPage();
 
-    if (referer) {
-      await page.setExtraHTTPHeaders({ Referer: referer });
-    }
+    try {
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      );
 
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-
-    // Wait for protection / Cloudflare challenge to resolve if present
-    let retries = 0;
-    while (retries < 10) {
-      const content = await page.content();
-      const $ = cheerio.load(content);
-      const title = $("title").text();
-      const bodyText = $("body").text().trim();
-
-      if (title && !title.includes("Just a moment") && !title.includes("Checking") && !title.includes("Attention Required")) {
-        if (bodyText.length > 300 || content.includes("videoTabs") || content.includes("options.php") || content.includes("entry-title") || content.includes("listupd") || content.includes("eplist")) {
-          break;
-        }
+      if (referer) {
+        await page.setExtraHTTPHeaders({ Referer: referer });
       }
 
-      await new Promise((r) => setTimeout(r, 1500));
-      retries++;
-    }
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
 
-    const content = await page.content();
-    return content;
-  } finally {
-    await page.close().catch(() => {});
+      let retries = 0;
+      while (retries < 8) {
+        const content = await page.content();
+        const $ = cheerio.load(content);
+        const title = $("title").text();
+        const bodyText = $("body").text().trim();
+
+        if (title && !title.includes("Just a moment") && !title.includes("Checking") && !title.includes("Attention Required")) {
+          if (bodyText.length > 300 || content.includes("videoTabs") || content.includes("options.php") || content.includes("entry-title") || content.includes("listupd") || content.includes("eplist")) {
+            break;
+          }
+        }
+
+        await new Promise((r) => setTimeout(r, 1200));
+        retries++;
+      }
+
+      const content = await page.content();
+      return content;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } catch (err) {
+    throw err;
   }
 }
 
-const HTTP_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-  "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-  "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-  "Sec-Ch-Ua-Mobile": "?0",
-  "Sec-Ch-Ua-Platform": '"Windows"',
-  "Sec-Fetch-Dest": "document",
-  "Sec-Fetch-Mode": "navigate",
-  "Sec-Fetch-Site": "none",
-  "Sec-Fetch-User": "?1",
-  "Upgrade-Insecure-Requests": "1",
-};
+const SCRAPER_USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+  "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+  "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+  "Twitterbot/1.0",
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+];
 
 async function fetchHtml(url, referer = null) {
-  try {
-    const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
-    const headers = { ...HTTP_HEADERS };
-    if (referer) {
-      headers.Referer = referer;
-    }
-    const response = await axios.get(url, {
-      timeout,
-      headers,
-      maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400,
-    });
-    
-    // Check if response is a Cloudflare challenge page
-    if (
-      typeof response.data === "string" &&
-      (response.data.includes("Just a moment...") ||
-        response.data.includes("cf-browser-verification") ||
-        response.data.includes("Checking your browser"))
-    ) {
-      throw new Error("Cloudflare challenge detected");
-    }
-    
-    return response.data;
-  } catch (error) {
+  const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 12000);
+  let lastError = null;
+
+  // Tier 1: Try with rotating User-Agents (including crawler/social bots that Cloudflare WAF whitelists)
+  for (const ua of SCRAPER_USER_AGENTS) {
     try {
-      console.log(`[AnimeD23] Intentando fallback con Puppeteer para: ${url}`);
-      return await fetchHtmlWithPuppeteer(url, referer);
-    } catch (puppeteerError) {
-      throw new ApiError(500, "No se pudo obtener contenido desde AnimeD23", error.message);
+      const headers = {
+        "User-Agent": ua,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Upgrade-Insecure-Requests": "1",
+      };
+      if (referer) {
+        headers.Referer = referer;
+      }
+
+      const response = await axios.get(url, {
+        timeout,
+        headers,
+        maxRedirects: 5,
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+
+      if (
+        typeof response.data === "string" &&
+        (response.data.includes("Just a moment...") ||
+          response.data.includes("cf-browser-verification") ||
+          response.data.includes("Checking your browser"))
+      ) {
+        continue;
+      }
+
+      if (typeof response.data === "string" && response.data.length > 200) {
+        return response.data;
+      }
+    } catch (error) {
+      lastError = error;
     }
+  }
+
+  // Tier 2: Try native globalThis.fetch (HTTP/2 with modern TLS ALPN)
+  try {
+    const fetchHeaders = {
+      "User-Agent": SCRAPER_USER_AGENTS[1],
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    };
+    if (referer) {
+      fetchHeaders.Referer = referer;
+    }
+
+    const fetchRes = await fetch(url, {
+      headers: fetchHeaders,
+      signal: AbortSignal.timeout(timeout),
+    });
+
+    if (fetchRes.ok) {
+      const text = await fetchRes.text();
+      if (text && !text.includes("Just a moment...")) {
+        return text;
+      }
+    }
+  } catch (fetchErr) {
+    lastError = fetchErr;
+  }
+
+  // Tier 3: Puppeteer fallback if available
+  try {
+    return await fetchHtmlWithPuppeteer(url, referer);
+  } catch (_puppeteerError) {
+    throw new ApiError(
+      500,
+      "No se pudo obtener contenido desde AnimeD23",
+      lastError ? lastError.message : "Cloudflare challenge block"
+    );
   }
 }
 
