@@ -6,42 +6,118 @@ const { ApiError } = require("../utils/api-error");
 const DEFAULT_DOMAIN = "animed23.com";
 const MULTIPLAYER_DOMAIN = "animed23.online";
 
+let puppeteerBrowser = null;
+
+async function getPuppeteerBrowser() {
+  if (!puppeteerBrowser) {
+    const puppeteer = require("puppeteer");
+    puppeteerBrowser = await puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+      ],
+    });
+  }
+  return puppeteerBrowser;
+}
+
+async function fetchHtmlWithPuppeteer(url, referer = null) {
+  const browser = await getPuppeteerBrowser();
+  const page = await browser.newPage();
+
+  try {
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    );
+
+    if (referer) {
+      await page.setExtraHTTPHeaders({ Referer: referer });
+    }
+
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+
+    // Wait for protection / Cloudflare challenge to resolve if present
+    let retries = 0;
+    while (retries < 10) {
+      const content = await page.content();
+      const $ = cheerio.load(content);
+      const title = $("title").text();
+      const bodyText = $("body").text().trim();
+
+      if (title && !title.includes("Just a moment") && !title.includes("Checking") && !title.includes("Attention Required")) {
+        if (bodyText.length > 300 || content.includes("videoTabs") || content.includes("options.php") || content.includes("entry-title") || content.includes("listupd") || content.includes("eplist")) {
+          break;
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, 1500));
+      retries++;
+    }
+
+    const content = await page.content();
+    return content;
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 const HTTP_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
   "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+  "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+  "Sec-Ch-Ua-Mobile": "?0",
+  "Sec-Ch-Ua-Platform": '"Windows"',
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
 };
 
-async function fetchHtml(url) {
+async function fetchHtml(url, referer = null) {
   try {
     const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
+    const headers = { ...HTTP_HEADERS };
+    if (referer) {
+      headers.Referer = referer;
+    }
     const response = await axios.get(url, {
       timeout,
-      headers: HTTP_HEADERS,
+      headers,
       maxRedirects: 5,
       validateStatus: (status) => status >= 200 && status < 400,
     });
+    
+    // Check if response is a Cloudflare challenge page
+    if (
+      typeof response.data === "string" &&
+      (response.data.includes("Just a moment...") ||
+        response.data.includes("cf-browser-verification") ||
+        response.data.includes("Checking your browser"))
+    ) {
+      throw new Error("Cloudflare challenge detected");
+    }
+    
     return response.data;
   } catch (error) {
-    throw new ApiError(500, "No se pudo obtener contenido desde AnimeD23", error.message);
+    try {
+      console.log(`[AnimeD23] Intentando fallback con Puppeteer para: ${url}`);
+      return await fetchHtmlWithPuppeteer(url, referer);
+    } catch (puppeteerError) {
+      throw new ApiError(500, "No se pudo obtener contenido desde AnimeD23", error.message);
+    }
   }
 }
 
 async function fetchContenedorHtml(containerId, refererUrl) {
+  const url = `https://${MULTIPLAYER_DOMAIN}/multiplayer/contenedor.php?id=${encodeURIComponent(containerId)}`;
   try {
-    const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
-    const url = `https://${MULTIPLAYER_DOMAIN}/multiplayer/contenedor.php?id=${encodeURIComponent(containerId)}`;
-    const response = await axios.get(url, {
-      timeout,
-      headers: {
-        ...HTTP_HEADERS,
-        Referer: refererUrl || `https://${MULTIPLAYER_DOMAIN}/`,
-      },
-      maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400,
-    });
-    return response.data || "";
+    return await fetchHtml(url, refererUrl || `https://${MULTIPLAYER_DOMAIN}/`);
   } catch (_error) {
     return "";
   }
@@ -398,7 +474,14 @@ async function getEpisodeLinks(urlCandidate, includeMega = true, excludeServers 
     domain = new URL(urlCandidate).host || DEFAULT_DOMAIN;
   } catch (_) {}
 
-  const episodeUrl = `https://${domain}/capitulo/${slug}-ep-${episodeNumber}/`;
+  let episodeUrl;
+  if (urlCandidate && urlCandidate.includes("/capitulo/")) {
+    const rawClean = urlCandidate.replace(/\?.*$/, "").replace(/#.*$/, "");
+    episodeUrl = rawClean.endsWith("/") ? rawClean : `${rawClean}/`;
+  } else {
+    episodeUrl = `https://${domain}/capitulo/${slug}-ep-${episodeNumber}/`;
+  }
+
   const html = await fetchHtml(episodeUrl);
   const $ = cheerio.load(html);
 
