@@ -17,14 +17,18 @@ const SERVER_PATTERNS = [
   { token: "pdrain", name: "PDrain", test: /(pixeldrain|pdrain)/i },
   { token: "hls", name: "HLS", test: /(hls|m3u8|zilla|player\.)/i },
   { token: "upnshare", name: "UPNShare", test: /(upnshare|uns\.bio)/i },
+  { token: "voe", name: "Voe", test: /(voe|voe-un-block|audaciousdefaulthouse)/i },
+  { token: "byse", name: "Byse", test: /(byse|bytebx)/i },
   { token: "mega", name: "Mega", test: /(mega\.nz|mega)/i },
   { token: "mp4upload", name: "MP4Upload", test: /(mp4upload)/i },
   { token: "1fichier", name: "1Fichier", test: /(1fichier)/i },
   { token: "fembed", name: "Fembed", test: /(fembed|femax20)/i },
+  { token: "streamwish", name: "Streamwish", test: /(streamwish|wishembed|wishfast|strwish)/i },
+  { token: "streamtape", name: "Streamtape", test: /(streamtape|streamta\.pe|tape)/i },
 ];
 
 const VIDEO_URL_REGEX =
-  /https?:\/\/(?:www\.)?(?:pixeldrain\.com|mega\.nz|mp4upload\.com|1fichier\.com|player\.[^\s"'<>]+|[^\s"'<>]*zilla[^\s"'<>]*|[^\s"'<>]*uns\.bio[^\s"'<>]*)[^\s"'<>]*/gi;
+  /https?:\/\/(?:www\.)?(?:pixeldrain\.com|mega\.nz|mp4upload\.com|1fichier\.com|player\.[^\s"'<>]+|[^\s"'<>]*zilla[^\s"'<>]*|[^\s"'<>]*uns\.bio[^\s"'<>]*|[^\s"'<>]*voe[^\s"'<>]*|[^\s"'<>]*byse[^\s"'<>]*)[^\s"'<>]*/gi;
 
 async function fetchHtml(url) {
   try {
@@ -344,7 +348,7 @@ function inferLinkKind(url, explicitKind) {
     return "stream";
   }
 
-  if (/(embed|play\/?|m3u8|hls|player\.)/i.test(url)) {
+  if (/(embed|play\/?|m3u8|hls|player\.|uns\.bio|upnshare|voe|byse|streamwish|streamtape|wishembed)/i.test(url)) {
     return "stream";
   }
 
@@ -363,7 +367,19 @@ function pushDeduped(target, link) {
 }
 
 function parseVariantContainer(container, kindHint, domain, collector) {
-  if (!isObject(container)) {
+  if (!isObject(container) && !Array.isArray(container)) {
+    return;
+  }
+
+  if (Array.isArray(container)) {
+    for (const entry of container) {
+      const normalized = normalizeLinkObject(entry, domain);
+      if (!normalized) {
+        continue;
+      }
+      const kind = inferLinkKind(normalized.url, kindHint);
+      pushDeduped(collector[kind].SUB, normalized);
+    }
     return;
   }
 
@@ -397,13 +413,13 @@ function parseVariantContainer(container, kindHint, domain, collector) {
             continue;
           }
           const childKind =
-            /download/i.test(childKey) ? "download" : /stream|embed|server/i.test(childKey) ? "stream" : inferLinkKind(normalized.url, kindHint);
+            /download/i.test(childKey) ? "download" : /stream|embed|server|player/i.test(childKey) ? "stream" : inferLinkKind(normalized.url, kindHint);
           pushDeduped(collector[childKind][variant], normalized);
           continue;
         }
 
         const childKind =
-          /download/i.test(childKey) ? "download" : /stream|embed|server/i.test(childKey) ? "stream" : kindHint || "stream";
+          /download/i.test(childKey) ? "download" : /stream|embed|server|player/i.test(childKey) ? "stream" : kindHint || "stream";
 
         for (const entry of childValue) {
           const normalized = normalizeLinkObject(entry, domain);
@@ -439,6 +455,26 @@ function extractLinksFromData(dataRoot, html, domain) {
 
     if (node.servers) {
       parseVariantContainer(node.servers, "stream", domain, collector);
+    }
+
+    if (node.players) {
+      parseVariantContainer(node.players, "stream", domain, collector);
+    }
+
+    if (node.streams) {
+      parseVariantContainer(node.streams, "stream", domain, collector);
+    }
+
+    if (node.embeds) {
+      parseVariantContainer(node.embeds, "stream", domain, collector);
+    }
+
+    if (node.sources) {
+      parseVariantContainer(node.sources, "stream", domain, collector);
+    }
+
+    if (node.options) {
+      parseVariantContainer(node.options, "stream", domain, collector);
     }
 
     const hasVariantShape =
