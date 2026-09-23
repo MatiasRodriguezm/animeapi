@@ -189,6 +189,19 @@ async function fetchContenedorHtml(containerId, refererUrl) {
   }
 }
 
+async function fetchContainerPhp(containerUrl, refererUrl) {
+  try {
+    let fullUrl = containerUrl;
+    if (fullUrl.includes("container.php") && !fullUrl.includes("open=1")) {
+      fullUrl += (fullUrl.includes("?") ? "&" : "?") + "open=1";
+    }
+    return await fetchHtml(fullUrl, refererUrl || `https://${DEFAULT_DOMAIN}/`);
+  } catch (_error) {
+    return "";
+  }
+}
+
+
 function normalizeToken(value) {
   return (value || "")
     .toString()
@@ -565,48 +578,150 @@ async function getEpisodeLinks(urlCandidate, includeMega = true, excludeServers 
   const streamLinks = { SUB: [], DUB: [] };
   const downloadLinks = { SUB: [], DUB: [] };
 
-  // 1. Find the options.php iframe
-  const iframeSrc = $("iframe[src*='options.php'], iframe").first().attr("src") || $("iframe").first().attr("data-src");
+  // 1. Collect all candidate iframes from the episode page
+  const iframeCandidates = [];
+  $("iframe").each((_, el) => {
+    const src = $(el).attr("src") || $(el).attr("data-src");
+    if (src && !iframeCandidates.includes(src)) {
+      iframeCandidates.push(src);
+    }
+  });
 
-  if (iframeSrc) {
-    try {
-      const parsedUrl = new URL(iframeSrc, `https://${MULTIPLAYER_DOMAIN}`);
-      const rawValue = parsedUrl.searchParams.get("value");
+  for (const rawIframeSrc of iframeCandidates) {
+    const iframeSrc = resolveAbsoluteUrl(rawIframeSrc, MULTIPLAYER_DOMAIN) || rawIframeSrc;
 
-      if (rawValue) {
-        const b64Part = rawValue.split(".")[0];
-        const jsonStr = Buffer.from(b64Part, "base64").toString("utf8");
-        const decodedValue = JSON.parse(jsonStr);
+    // Case A: Modern animed23 container.php player
+    if (iframeSrc.includes("container.php")) {
+      try {
+        const containerHtml = await fetchContainerPhp(iframeSrc, episodeUrl);
+        if (containerHtml) {
+          const $c = cheerio.load(containerHtml);
+          const langAttr = ($c("#embed-player").attr("data-language") || $c("main").attr("data-language") || "SUB").toUpperCase();
+          const isDub = langAttr.includes("LAT") || langAttr.includes("DUB") || langAttr.includes("CAST");
+          const targetStream = isDub ? streamLinks.DUB : streamLinks.SUB;
+          const targetDownload = isDub ? downloadLinks.DUB : downloadLinks.SUB;
 
-        // Process Subtitle servers
-        if (decodedValue && decodedValue.sub) {
-          const contenedorHtml = await fetchContenedorHtml(decodedValue.sub, iframeSrc);
-          if (contenedorHtml) {
-            const vMatch = contenedorHtml.match(/const\s+videoTabs\s*=\s*(\[[\s\S]*?\]);/);
-            if (vMatch) {
-              const vTabs = JSON.parse(vMatch[1]);
-              for (const tab of vTabs) {
-                if (tab.url && tab.status === "active") {
-                  streamLinks.SUB.push({
-                    server: tab.tab_name || "Unknown",
-                    url: tab.url,
-                  });
+          // Streaming servers (.embed-tab)
+          $c(".embed-tab, button[data-player-url]").each((_, tabEl) => {
+            const playerUrl = $c(tabEl).attr("data-player-url");
+            if (!playerUrl) return;
+            const serverLabel =
+              $c(tabEl).attr("data-player-label") ||
+              $c(tabEl).find(".embed-tab-name").text().trim() ||
+              "Unknown";
+
+            targetStream.push({
+              server: serverLabel,
+              url: playerUrl,
+            });
+          });
+
+          // Download panels (.embed-download-panel)
+          $c(".embed-download-panel").each((_, panelEl) => {
+            const quality = $c(panelEl).attr("data-quality-panel") || "default";
+            $c(panelEl).find("a.embed-download-button, a[href]").each((_, aEl) => {
+              const dwnUrl = $c(aEl).attr("href");
+              if (!dwnUrl || dwnUrl.startsWith("#") || dwnUrl.startsWith("javascript:")) return;
+
+              const title = $c(aEl).attr("title") || $c(aEl).attr("aria-label") || "";
+              let serverName = "";
+              if (title) {
+                serverName = title.split(/[·•|-]/)[0].trim();
+              }
+              if (!serverName) {
+                serverName = $c(aEl).find("img").attr("alt") || quality;
+              }
+
+              targetDownload.push({
+                server: serverName ? `${serverName} (${quality})` : quality,
+                url: dwnUrl,
+                quality: quality,
+              });
+            });
+          });
+        }
+      } catch (_) {}
+    }
+
+    // Case B: Legacy options.php iframe
+    if (iframeSrc.includes("options.php") || iframeSrc.includes("value=")) {
+      try {
+        const parsedUrl = new URL(iframeSrc, `https://${MULTIPLAYER_DOMAIN}`);
+        const rawValue = parsedUrl.searchParams.get("value");
+
+        if (rawValue) {
+          const b64Part = rawValue.split(".")[0];
+          const jsonStr = Buffer.from(b64Part, "base64").toString("utf8");
+          const decodedValue = JSON.parse(jsonStr);
+
+          // Process Subtitle servers
+          if (decodedValue && decodedValue.sub) {
+            const contenedorHtml = await fetchContenedorHtml(decodedValue.sub, iframeSrc);
+            if (contenedorHtml) {
+              const vMatch = contenedorHtml.match(/const\s+videoTabs\s*=\s*(\[[\s\S]*?\]);/);
+              if (vMatch) {
+                const vTabs = JSON.parse(vMatch[1]);
+                for (const tab of vTabs) {
+                  if (tab.url && tab.status === "active") {
+                    streamLinks.SUB.push({
+                      server: tab.tab_name || "Unknown",
+                      url: tab.url,
+                    });
+                  }
+                }
+              }
+
+              const dMatch = contenedorHtml.match(/const\s+downloadsByQuality\s*=\s*(\{[\s\S]*?\});/);
+              if (dMatch) {
+                const dQuality = JSON.parse(dMatch[1]);
+                for (const [qKey, items] of Object.entries(dQuality)) {
+                  if (Array.isArray(items)) {
+                    for (const item of items) {
+                      if (item.download_url) {
+                        downloadLinks.SUB.push({
+                          server: item.server_name ? `${item.server_name} (${qKey})` : qKey,
+                          url: item.download_url,
+                          quality: qKey,
+                        });
+                      }
+                    }
+                  }
                 }
               }
             }
+          }
 
-            const dMatch = contenedorHtml.match(/const\s+downloadsByQuality\s*=\s*(\{[\s\S]*?\});/);
-            if (dMatch) {
-              const dQuality = JSON.parse(dMatch[1]);
-              for (const [qKey, items] of Object.entries(dQuality)) {
-                if (Array.isArray(items)) {
-                  for (const item of items) {
-                    if (item.download_url) {
-                      downloadLinks.SUB.push({
-                        server: item.server_name ? `${item.server_name} (${qKey})` : qKey,
-                        url: item.download_url,
-                        quality: qKey,
-                      });
+          // Process Dubbed (Latino / Castellano) servers
+          const dubId = decodedValue.lat || decodedValue.cast;
+          if (dubId) {
+            const contenedorHtml = await fetchContenedorHtml(dubId, iframeSrc);
+            if (contenedorHtml) {
+              const vMatch = contenedorHtml.match(/const\s+videoTabs\s*=\s*(\[[\s\S]*?\]);/);
+              if (vMatch) {
+                const vTabs = JSON.parse(vMatch[1]);
+                for (const tab of vTabs) {
+                  if (tab.url && tab.status === "active") {
+                    streamLinks.DUB.push({
+                      server: tab.tab_name || "Unknown",
+                      url: tab.url,
+                    });
+                  }
+                }
+              }
+
+              const dMatch = contenedorHtml.match(/const\s+downloadsByQuality\s*=\s*(\{[\s\S]*?\});/);
+              if (dMatch) {
+                const dQuality = JSON.parse(dMatch[1]);
+                for (const [qKey, items] of Object.entries(dQuality)) {
+                  if (Array.isArray(items)) {
+                    for (const item of items) {
+                      if (item.download_url) {
+                        downloadLinks.DUB.push({
+                          server: item.server_name ? `${item.server_name} (${qKey})` : qKey,
+                          url: item.download_url,
+                          quality: qKey,
+                        });
+                      }
                     }
                   }
                 }
@@ -614,46 +729,8 @@ async function getEpisodeLinks(urlCandidate, includeMega = true, excludeServers 
             }
           }
         }
-
-        // Process Dubbed (Latino / Castellano) servers
-        const dubId = decodedValue.lat || decodedValue.cast;
-        if (dubId) {
-          const contenedorHtml = await fetchContenedorHtml(dubId, iframeSrc);
-          if (contenedorHtml) {
-            const vMatch = contenedorHtml.match(/const\s+videoTabs\s*=\s*(\[[\s\S]*?\]);/);
-            if (vMatch) {
-              const vTabs = JSON.parse(vMatch[1]);
-              for (const tab of vTabs) {
-                if (tab.url && tab.status === "active") {
-                  streamLinks.DUB.push({
-                    server: tab.tab_name || "Unknown",
-                    url: tab.url,
-                  });
-                }
-              }
-            }
-
-            const dMatch = contenedorHtml.match(/const\s+downloadsByQuality\s*=\s*(\{[\s\S]*?\});/);
-            if (dMatch) {
-              const dQuality = JSON.parse(dMatch[1]);
-              for (const [qKey, items] of Object.entries(dQuality)) {
-                if (Array.isArray(items)) {
-                  for (const item of items) {
-                    if (item.download_url) {
-                      downloadLinks.DUB.push({
-                        server: item.server_name ? `${item.server_name} (${qKey})` : qKey,
-                        url: item.download_url,
-                        quality: qKey,
-                      });
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
   }
 
   // Server filtering
