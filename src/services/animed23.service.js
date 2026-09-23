@@ -85,6 +85,7 @@ async function fetchHtml(url, referer = null) {
   const timeout = Number(
     process.env.ANIMED23_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 25000
   );
+  let tier1Error = null;
   let lastError = null;
 
   // Tier 1: Cloudflare Worker Proxy (100% reliable bypass for cloud environments like Render)
@@ -119,6 +120,10 @@ async function fetchHtml(url, referer = null) {
       ) {
         return response.data;
       }
+
+      tier1Error = new Error(
+        `Proxy returned unparseable content (length: ${response?.data?.length || 0})`
+      );
     } catch (proxyError) {
       console.error(
         "[AnimeD23 Proxy Error]:",
@@ -126,7 +131,7 @@ async function fetchHtml(url, referer = null) {
         proxyError.response?.status,
         proxyTarget
       );
-      lastError = proxyError;
+      tier1Error = proxyError;
     }
   }
 
@@ -144,7 +149,7 @@ async function fetchHtml(url, referer = null) {
       }
 
       const response = await axios.get(url, {
-        timeout,
+        timeout: 10000,
         headers,
         maxRedirects: 5,
         validateStatus: (status) => status >= 200 && status < 400,
@@ -179,7 +184,7 @@ async function fetchHtml(url, referer = null) {
 
     const fetchRes = await fetch(url, {
       headers: fetchHeaders,
-      signal: AbortSignal.timeout(timeout),
+      signal: AbortSignal.timeout(10000),
     });
 
     if (fetchRes.ok) {
@@ -196,14 +201,16 @@ async function fetchHtml(url, referer = null) {
   try {
     return await fetchHtmlWithPuppeteer(url, referer);
   } catch (_puppeteerError) {
-    console.error(
-      "[AnimeD23 Failed All Tiers]:",
-      lastError ? lastError.message : "Cloudflare challenge block"
-    );
+    const failureReason = tier1Error
+      ? `Proxy: ${tier1Error.message}`
+      : lastError
+      ? lastError.message
+      : "Cloudflare challenge block";
+    console.error("[AnimeD23 Failed All Tiers]:", failureReason);
     throw new ApiError(
       500,
       "No se pudo obtener contenido desde AnimeD23",
-      lastError ? lastError.message : "Cloudflare challenge block"
+      failureReason
     );
   }
 }
