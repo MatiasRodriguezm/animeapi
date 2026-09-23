@@ -81,15 +81,29 @@ const SCRAPER_USER_AGENTS = [
 ];
 
 async function fetchHtml(url, referer = null) {
-  const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 12000);
+  const timeout = Number(
+    process.env.ANIMED23_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 25000
+  );
   let lastError = null;
 
   // Tier 1: Cloudflare Worker Proxy (100% reliable bypass for cloud environments like Render)
   if (CF_PROXY_URL) {
     try {
-      const proxyTarget = `${CF_PROXY_URL}${encodeURIComponent(url)}`;
+      const baseUrl = CF_PROXY_URL.includes("?")
+        ? CF_PROXY_URL.replace(/[\?&]url=$/, "")
+        : CF_PROXY_URL;
+      const separator = baseUrl.includes("?") ? "&" : "?";
+      let proxyTarget = `${baseUrl}${separator}url=${encodeURIComponent(url)}`;
+      if (referer) {
+        proxyTarget += `&referer=${encodeURIComponent(referer)}`;
+      }
+
       const response = await axios.get(proxyTarget, {
         timeout,
+        headers: {
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          ...(referer ? { Referer: referer } : {}),
+        },
         validateStatus: (status) => status >= 200 && status < 400,
       });
 
@@ -554,14 +568,33 @@ async function getEpisodeLinks(urlCandidate, includeMega = true, excludeServers 
   } catch (_) {}
 
   let episodeUrl;
+  const canonicalUrl = `https://${domain}/capitulo/${slug}-ep-${episodeNumber}/`;
   if (urlCandidate && urlCandidate.includes("/capitulo/")) {
     const rawClean = urlCandidate.replace(/\?.*$/, "").replace(/#.*$/, "");
-    episodeUrl = rawClean.endsWith("/") ? rawClean : `${rawClean}/`;
+    const cleanUrl = rawClean.endsWith("/") ? rawClean : `${rawClean}/`;
+    if (!cleanUrl.includes("-ep-")) {
+      episodeUrl = canonicalUrl;
+    } else {
+      episodeUrl = cleanUrl;
+    }
   } else {
-    episodeUrl = `https://${domain}/capitulo/${slug}-ep-${episodeNumber}/`;
+    episodeUrl = canonicalUrl;
   }
 
-  const html = await fetchHtml(episodeUrl);
+  const animeReferer = `https://${domain}/anime/${slug}/`;
+  let html;
+  try {
+    html = await fetchHtml(episodeUrl, animeReferer);
+    if (html && (html.includes("Página no encontrada") || html.includes("404 Not Found")) && episodeUrl !== canonicalUrl) {
+      html = await fetchHtml(canonicalUrl, animeReferer);
+    }
+  } catch (err) {
+    if (episodeUrl !== canonicalUrl) {
+      html = await fetchHtml(canonicalUrl, animeReferer);
+    } else {
+      throw err;
+    }
+  }
   const $ = cheerio.load(html);
 
   const episodeTitle =
