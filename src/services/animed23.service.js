@@ -67,9 +67,10 @@ async function fetchHtmlWithPuppeteer(url, referer = null) {
   }
 }
 
-const CF_PROXY_URL =
+const rawProxyUrl =
   process.env.ANIMED23_PROXY_URL ||
   "https://proxy-anime.elsodaestacio.workers.dev/?url=";
+const CF_PROXY_URL = (rawProxyUrl || "").replace(/^["']|["']$/g, "").trim();
 
 const SCRAPER_USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -88,12 +89,13 @@ async function fetchHtml(url, referer = null) {
 
   // Tier 1: Cloudflare Worker Proxy (100% reliable bypass for cloud environments like Render)
   if (CF_PROXY_URL) {
+    let proxyTarget = "";
     try {
-      const baseUrl = CF_PROXY_URL.includes("?")
+      const cleanBase = CF_PROXY_URL.includes("?")
         ? CF_PROXY_URL.replace(/[\?&]url=$/, "")
         : CF_PROXY_URL;
-      const separator = baseUrl.includes("?") ? "&" : "?";
-      let proxyTarget = `${baseUrl}${separator}url=${encodeURIComponent(url)}`;
+      const separator = cleanBase.includes("?") ? "&" : "?";
+      proxyTarget = `${cleanBase}${separator}url=${encodeURIComponent(url)}`;
       if (referer) {
         proxyTarget += `&referer=${encodeURIComponent(referer)}`;
       }
@@ -101,6 +103,8 @@ async function fetchHtml(url, referer = null) {
       const response = await axios.get(proxyTarget, {
         timeout,
         headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           ...(referer ? { Referer: referer } : {}),
         },
@@ -116,6 +120,12 @@ async function fetchHtml(url, referer = null) {
         return response.data;
       }
     } catch (proxyError) {
+      console.error(
+        "[AnimeD23 Proxy Error]:",
+        proxyError.message,
+        proxyError.response?.status,
+        proxyTarget
+      );
       lastError = proxyError;
     }
   }
@@ -186,6 +196,10 @@ async function fetchHtml(url, referer = null) {
   try {
     return await fetchHtmlWithPuppeteer(url, referer);
   } catch (_puppeteerError) {
+    console.error(
+      "[AnimeD23 Failed All Tiers]:",
+      lastError ? lastError.message : "Cloudflare challenge block"
+    );
     throw new ApiError(
       500,
       "No se pudo obtener contenido desde AnimeD23",

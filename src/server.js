@@ -58,14 +58,15 @@ app.use((_req, _res, next) => {
 
 app.use((error, _req, res, _next) => {
   const statusCode = error.statusCode || 500;
+  console.error(`[API Error ${statusCode}]:`, error.message, error.details || "");
 
   const response = {
     success: false,
     message: error.message || "Error interno del servidor",
   };
 
-  if (process.env.NODE_ENV !== "production" && error.details) {
-    response.error = error.details;
+  if (error.details) {
+    response.details = error.details;
   }
 
   res.status(statusCode).json(response);
