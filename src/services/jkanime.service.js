@@ -6,47 +6,174 @@ const { ApiError } = require("../utils/api-error");
 
 const DEFAULT_DOMAIN = "jkanime.net";
 
-const HTTP_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-};
+const rawProxyUrl =
+  process.env.JKANIME_PROXY_URL ||
+  process.env.GLOBAL_PROXY_URL ||
+  (process.env.ANIMED23_PROXY_URL && process.env.ANIMED23_PROXY_URL.includes("scraperapi")
+    ? process.env.ANIMED23_PROXY_URL
+    : "");
+const PROXY_URL = (rawProxyUrl || "").replace(/^["']|["']$/g, "").trim();
 
-async function fetchHtml(url) {
-  try {
-    const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
-    const response = await axios.get(url, {
-      timeout,
-      headers: HTTP_HEADERS,
-      maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400,
-    });
-    return response.data;
-  } catch (error) {
-    throw new ApiError(500, "No se pudo obtener contenido desde JKAnime", error.message);
+const SCRAPER_USER_AGENTS = [
+  "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+  "Twitterbot/1.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+];
+
+function buildProxyTarget(targetUrl, referer = null) {
+  if (!PROXY_URL) return null;
+  const cleanBase = PROXY_URL.includes("?")
+    ? PROXY_URL.replace(/[\?&]url=$/, "")
+    : PROXY_URL;
+  const separator = cleanBase.includes("?") ? "&" : "?";
+  let target = `${cleanBase}${separator}url=${encodeURIComponent(targetUrl)}`;
+  if (referer && !PROXY_URL.includes("scraperapi")) {
+    target += `&referer=${encodeURIComponent(referer)}`;
   }
+  return target;
+}
+
+async function fetchHtml(url, referer = null) {
+  const timeout = Number(
+    process.env.JKANIME_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 20000
+  );
+  let lastError = null;
+
+  // Step 1: Direct request with rotating User-Agents (Fast & Free)
+  for (const ua of SCRAPER_USER_AGENTS) {
+    try {
+      const headers = {
+        "User-Agent": ua,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Upgrade-Insecure-Requests": "1",
+        ...(referer ? { Referer: referer } : {}),
+      };
+
+      const response = await axios.get(url, {
+        timeout: Math.min(timeout, 8000),
+        headers,
+        maxRedirects: 5,
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+
+      if (
+        typeof response.data === "string" &&
+        response.data.length > 200 &&
+        !response.data.includes("Just a moment...") &&
+        !response.data.includes("cf-browser-verification") &&
+        !response.data.includes("Checking your browser")
+      ) {
+        return response.data;
+      }
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  // Step 2: Proxy fallback (ScraperAPI / dedicated proxy for cloud environments like Render)
+  const proxyTarget = buildProxyTarget(url, referer);
+  if (proxyTarget) {
+    try {
+      const response = await axios.get(proxyTarget, {
+        timeout,
+        headers: {
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+
+      if (
+        typeof response.data === "string" &&
+        response.data.length > 200 &&
+        !response.data.includes("Just a moment...") &&
+        !response.data.includes("cf-browser-verification")
+      ) {
+        return response.data;
+      }
+    } catch (proxyError) {
+      console.error(
+        "[JKAnime Proxy Error]:",
+        proxyError.message,
+        proxyError.response?.status
+      );
+      lastError = proxyError;
+    }
+  }
+
+  // Step 3: Native globalThis.fetch fallback (HTTP/2)
+  try {
+    const fetchRes = await fetch(url, {
+      headers: {
+        "User-Agent": SCRAPER_USER_AGENTS[0],
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ...(referer ? { Referer: referer } : {}),
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (fetchRes.ok) {
+      const text = await fetchRes.text();
+      if (text && !text.includes("Just a moment...")) {
+        return text;
+      }
+    }
+  } catch (fetchErr) {
+    lastError = fetchErr;
+  }
+
+  throw new ApiError(
+    500,
+    "No se pudo obtener contenido desde JKAnime",
+    lastError ? lastError.message : "Cloudflare challenge block"
+  );
 }
 
 async function fetchJson(url, options = {}) {
+  const timeout = Number(
+    process.env.JKANIME_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 20000
+  );
+
+  // Direct try first
   try {
-    const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
     const response = await axios({
       url,
-      timeout,
+      timeout: Math.min(timeout, 8000),
       maxRedirects: 5,
       validateStatus: (status) => status >= 200 && status < 400,
       headers: {
-        ...HTTP_HEADERS,
+        "User-Agent": SCRAPER_USER_AGENTS[0],
+        Accept: "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
         ...(options.headers || {}),
       },
       method: options.method || "GET",
       data: options.data || undefined,
     });
     return response.data;
-  } catch (error) {
-    return null;
+  } catch (_directError) {}
+
+  // Proxy try if available
+  const proxyTarget = buildProxyTarget(url, options.headers?.Referer);
+  if (proxyTarget) {
+    try {
+      const response = await axios({
+        url: proxyTarget,
+        timeout,
+        validateStatus: (status) => status >= 200 && status < 400,
+        headers: {
+          Accept: "application/json, text/javascript, */*; q=0.01",
+          ...(options.headers || {}),
+        },
+        method: options.method || "GET",
+        data: options.data || undefined,
+      });
+      return response.data;
+    } catch (_proxyError) {}
   }
+
+  return null;
 }
 
 function resolveAbsoluteUrl(urlCandidate, domain = DEFAULT_DOMAIN) {
