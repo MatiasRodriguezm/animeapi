@@ -6,13 +6,42 @@ const { ApiError } = require("../utils/api-error");
 
 const DEFAULT_DOMAIN = "jkanime.net";
 
-const rawProxyUrl =
-  process.env.JKANIME_PROXY_URL ||
-  process.env.GLOBAL_PROXY_URL ||
-  (process.env.ANIMED23_PROXY_URL && process.env.ANIMED23_PROXY_URL.includes("scraperapi")
-    ? process.env.ANIMED23_PROXY_URL
-    : "");
-const PROXY_URL = (rawProxyUrl || "").replace(/^["']|["']$/g, "").trim();
+function getProxyTargets(targetUrl, referer = null) {
+  const targets = [];
+  const rawList = [
+    process.env.JKANIME_PROXY_URL,
+    process.env.GLOBAL_PROXY_URL,
+    process.env.ANIMED23_PROXY_URL,
+    process.env.FALLBACK_PROXY_URL,
+    process.env.SCRAPINGANT_PROXY_URL,
+    "https://api.scrapingant.com/v2/general?x-api-key=80a18b4471cd4ec6be4426668aed321a&url=",
+  ];
+
+  for (const raw of rawList) {
+    if (!raw || typeof raw !== "string") continue;
+    const trimmed = raw.replace(/^["']|["']$/g, "").trim();
+    if (!trimmed) continue;
+
+    const cleanBase = trimmed.includes("?")
+      ? trimmed.replace(/[\?&]url=$/, "")
+      : trimmed;
+    const separator = cleanBase.includes("?") ? "&" : "?";
+    let target = `${cleanBase}${separator}url=${encodeURIComponent(targetUrl)}`;
+    if (
+      referer &&
+      !trimmed.includes("scraperapi") &&
+      !trimmed.includes("scrapingant")
+    ) {
+      target += `&referer=${encodeURIComponent(referer)}`;
+    }
+
+    if (!targets.includes(target)) {
+      targets.push(target);
+    }
+  }
+
+  return targets;
+}
 
 const SCRAPER_USER_AGENTS = [
   "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
@@ -21,22 +50,9 @@ const SCRAPER_USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ];
 
-function buildProxyTarget(targetUrl, referer = null) {
-  if (!PROXY_URL) return null;
-  const cleanBase = PROXY_URL.includes("?")
-    ? PROXY_URL.replace(/[\?&]url=$/, "")
-    : PROXY_URL;
-  const separator = cleanBase.includes("?") ? "&" : "?";
-  let target = `${cleanBase}${separator}url=${encodeURIComponent(targetUrl)}`;
-  if (referer && !PROXY_URL.includes("scraperapi")) {
-    target += `&referer=${encodeURIComponent(referer)}`;
-  }
-  return target;
-}
-
 async function fetchHtml(url, referer = null) {
   const timeout = Number(
-    process.env.JKANIME_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 20000
+    process.env.JKANIME_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 25000
   );
   let lastError = null;
 
@@ -72,12 +88,16 @@ async function fetchHtml(url, referer = null) {
     }
   }
 
-  // Step 2: Proxy fallback (ScraperAPI / dedicated proxy for cloud environments like Render)
-  const proxyTarget = buildProxyTarget(url, referer);
-  if (proxyTarget) {
+  // Step 2: Cascading Proxies fallback (Primary ScraperAPI -> Secondary ScrapingAnt)
+  const proxyTargets = getProxyTargets(url, referer);
+  for (const proxyTarget of proxyTargets) {
     try {
+      const proxyTimeout = proxyTarget.includes("scrapingant")
+        ? Math.max(timeout, 45000)
+        : timeout;
+
       const response = await axios.get(proxyTarget, {
-        timeout,
+        timeout: proxyTimeout,
         headers: {
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
@@ -88,15 +108,14 @@ async function fetchHtml(url, referer = null) {
         typeof response.data === "string" &&
         response.data.length > 200 &&
         !response.data.includes("Just a moment...") &&
-        !response.data.includes("cf-browser-verification")
+        !response.data.includes("cf-browser-verification") &&
+        !response.data.includes("Checking your browser")
       ) {
         return response.data;
       }
     } catch (proxyError) {
-      console.error(
-        "[JKAnime Proxy Error]:",
-        proxyError.message,
-        proxyError.response?.status
+      console.warn(
+        `[JKAnime Proxy Fallback]: Proxy failed (${proxyError.message}, status ${proxyError.response?.status}). Trying next proxy...`
       );
       lastError = proxyError;
     }
@@ -155,8 +174,8 @@ async function fetchJson(url, options = {}) {
   } catch (_directError) {}
 
   // Proxy try if available
-  const proxyTarget = buildProxyTarget(url, options.headers?.Referer);
-  if (proxyTarget) {
+  const proxyTargets = getProxyTargets(url, options.headers?.Referer);
+  for (const proxyTarget of proxyTargets) {
     try {
       const response = await axios({
         url: proxyTarget,

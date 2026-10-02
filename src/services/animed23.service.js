@@ -67,10 +67,43 @@ async function fetchHtmlWithPuppeteer(url, referer = null) {
   }
 }
 
-const rawProxyUrl =
-  process.env.ANIMED23_PROXY_URL ||
-  "https://proxy-anime.elsodaestacio.workers.dev/?url=";
-const CF_PROXY_URL = (rawProxyUrl || "").replace(/^["']|["']$/g, "").trim();
+function getProxyTargets(targetUrl, referer = null) {
+  const targets = [];
+  const rawList = [
+    process.env.ANIMED23_PROXY_URL,
+    process.env.GLOBAL_PROXY_URL,
+    process.env.JKANIME_PROXY_URL,
+    process.env.FALLBACK_PROXY_URL,
+    process.env.SCRAPINGANT_PROXY_URL,
+    "https://api.scrapingant.com/v2/general?x-api-key=80a18b4471cd4ec6be4426668aed321a&url=",
+    "https://proxy-anime.elsodaestacio.workers.dev/?url=",
+  ];
+
+  for (const raw of rawList) {
+    if (!raw || typeof raw !== "string") continue;
+    const trimmed = raw.replace(/^["']|["']$/g, "").trim();
+    if (!trimmed) continue;
+
+    const cleanBase = trimmed.includes("?")
+      ? trimmed.replace(/[\?&]url=$/, "")
+      : trimmed;
+    const separator = cleanBase.includes("?") ? "&" : "?";
+    let target = `${cleanBase}${separator}url=${encodeURIComponent(targetUrl)}`;
+    if (
+      referer &&
+      !trimmed.includes("scraperapi") &&
+      !trimmed.includes("scrapingant")
+    ) {
+      target += `&referer=${encodeURIComponent(referer)}`;
+    }
+
+    if (!targets.includes(target)) {
+      targets.push(target);
+    }
+  }
+
+  return targets;
+}
 
 const SCRAPER_USER_AGENTS = [
   "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
@@ -87,21 +120,16 @@ async function fetchHtml(url, referer = null) {
   let tier1Error = null;
   let lastError = null;
 
-  // Tier 1: Cloudflare Worker Proxy (100% reliable bypass for cloud environments like Render)
-  if (CF_PROXY_URL) {
-    let proxyTarget = "";
+  // Tier 1: Cascading Proxies (Primary e.g. ScraperAPI -> Secondary e.g. ScrapingAnt / Worker)
+  const proxyTargets = getProxyTargets(url, referer);
+  for (const proxyTarget of proxyTargets) {
     try {
-      const cleanBase = CF_PROXY_URL.includes("?")
-        ? CF_PROXY_URL.replace(/[\?&]url=$/, "")
-        : CF_PROXY_URL;
-      const separator = cleanBase.includes("?") ? "&" : "?";
-      proxyTarget = `${cleanBase}${separator}url=${encodeURIComponent(url)}`;
-      if (referer) {
-        proxyTarget += `&referer=${encodeURIComponent(referer)}`;
-      }
+      const proxyTimeout = proxyTarget.includes("scrapingant")
+        ? Math.max(timeout, 45000)
+        : timeout;
 
       const response = await axios.get(proxyTarget, {
-        timeout,
+        timeout: proxyTimeout,
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -115,7 +143,8 @@ async function fetchHtml(url, referer = null) {
         typeof response.data === "string" &&
         response.data.length > 200 &&
         !response.data.includes("Just a moment...") &&
-        !response.data.includes("cf-browser-verification")
+        !response.data.includes("cf-browser-verification") &&
+        !response.data.includes("Checking your browser")
       ) {
         return response.data;
       }
@@ -124,11 +153,8 @@ async function fetchHtml(url, referer = null) {
         `Proxy returned unparseable content (length: ${response?.data?.length || 0})`
       );
     } catch (proxyError) {
-      console.error(
-        "[AnimeD23 Proxy Error]:",
-        proxyError.message,
-        proxyError.response?.status,
-        proxyTarget
+      console.warn(
+        `[AnimeD23 Proxy Fallback]: Proxy failed (${proxyError.message}, status ${proxyError.response?.status}). Trying next proxy...`
       );
       tier1Error = proxyError;
     }
