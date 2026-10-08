@@ -833,110 +833,56 @@ async function getEpisodeLinks(urlCandidate, includeMegaRaw, excludeServersRaw) 
 async function getLatestEpisodes(domainCandidate) {
   const domain = (domainCandidate || DEFAULT_DOMAIN).toString().trim();
   const searchUrl = `https://${domain}/`;
-  let html = null;
+  const html = await fetchHtml(searchUrl, null, true);
 
-  try {
-    html = await fetchHtml(searchUrl, null, true);
-  } catch (_e) {
-    html = null;
-  }
+  const $ = cheerio.load(html);
+  const results = [];
 
-  if (html) {
-    const $ = cheerio.load(html);
-    const results = [];
+  // Target only the programming grid cards, ignoring hero banner/carousel
+  $(".card.ml-2.mr-2 a, .row.mode1.autoimage a, .dir1 a").each((_, element) => {
+    const a = $(element);
+    const rawUrl = a.attr("href");
+    if (!rawUrl || !rawUrl.match(/\/\d+\/?$/)) return;
 
-    // Target only the programming grid cards, ignoring hero banner/carousel
-    $(".card.ml-2.mr-2 a, .row.mode1.autoimage a, .dir1 a").each((_, element) => {
-      const a = $(element);
-      const rawUrl = a.attr("href");
-      if (!rawUrl || !rawUrl.match(/\/\d+\/?$/)) return;
+    // Normalize URL
+    const fullUrl = rawUrl.startsWith("http") ? rawUrl : `https://${domain}${rawUrl}`;
+    const normalizedUrl = fullUrl.trim().replace(/\/+$/, "") + "/";
 
-      // Normalize URL
-      const fullUrl = rawUrl.startsWith("http") ? rawUrl : `https://${domain}${rawUrl}`;
-      const normalizedUrl = fullUrl.trim().replace(/\/+$/, "") + "/";
+    const title = a.find("h5, .title, .card-title").text().trim() || a.text().trim();
+    if (!title || title === "Ver ahora") return;
 
-      const title = a.find("h5, .title, .card-title").text().trim() || a.text().trim();
-      if (!title || title === "Ver ahora") return;
+    const imgEl = a.find("img");
+    const image = imgEl.attr("src") || imgEl.attr("data-animepic") || imgEl.attr("data-src") || null;
 
-      const imgEl = a.find("img");
-      const image = imgEl.attr("src") || imgEl.attr("data-animepic") || imgEl.attr("data-src") || null;
+    const segments = new URL(normalizedUrl).pathname.split("/").filter(Boolean);
+    const slug = segments[segments.length - 2] || "";
+    const number = parseEpisodeNumberFromUrl(normalizedUrl);
 
-      const segments = new URL(normalizedUrl).pathname.split("/").filter(Boolean);
-      const slug = segments[segments.length - 2] || "";
-      const number = parseEpisodeNumberFromUrl(normalizedUrl);
-
-      results.push({
-        id: null,
-        title: title.replace(/\n/g, "").trim(),
-        episode: number,
-        slug,
-        url: normalizedUrl,
-        image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
-      });
+    results.push({
+      id: null,
+      title: title.replace(/\n/g, "").trim(),
+      episode: number,
+      slug,
+      url: normalizedUrl,
+      image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
     });
+  });
 
-    const seen = new Set();
-    const deduped = [];
-    for (const item of results) {
-      const key = `${item.slug}-${item.episode}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        deduped.push(item);
-      }
-    }
-
-    if (deduped.length > 0) {
-      return {
-        success: true,
-        data: { results: deduped, count: deduped.length },
-        source: "jkanime",
-      };
+  const seen = new Set();
+  const deduped = [];
+  for (const item of results) {
+    const key = `${item.slug}-${item.episode}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(item);
     }
   }
 
-  // Fallback: Real-time sitemap feed (immune to Cloudflare challenges)
-  try {
-    const sitemapUrl = `https://${domain}/sitemap-episodios.xml`;
-    const xml = await scraperClient.fetchHtml(sitemapUrl, { useCache: true });
-    if (xml && xml.includes("<loc>")) {
-      const matches = [...xml.matchAll(/<loc>(https?:\/\/[^\/]+\/([^\/]+)\/(\d+)\/?)<\/loc>/g)];
-      if (matches.length > 0) {
-        const seen = new Set();
-        const deduped = [];
-        for (const m of matches) {
-          const rawUrl = m[1];
-          const slug = m[2];
-          const episode = Number(m[3]);
-          const key = `${slug}-${episode}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            const title = slug
-              .split("-")
-              .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-              .join(" ");
-            deduped.push({
-              id: null,
-              title,
-              episode,
-              slug,
-              url: rawUrl.endsWith("/") ? rawUrl : `${rawUrl}/`,
-              image: `https://cdn.jkdesa.com/assets/images/animes/image/${slug}.jpg`,
-            });
-          }
-        }
-
-        if (deduped.length > 0) {
-          return {
-            success: true,
-            data: { results: deduped, count: deduped.length },
-            source: "jkanime",
-          };
-        }
-      }
-    }
-  } catch (_sitemapErr) {}
-
-  throw new ApiError(500, "No se pudo obtener contenido desde JKAnime");
+  return {
+    success: true,
+    data: { results: deduped, count: deduped.length },
+    source: "jkanime",
+  };
 }
 
 module.exports = {
