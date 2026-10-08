@@ -3,6 +3,7 @@ const cheerio = require("cheerio");
 const vm = require("node:vm");
 const { URL } = require("node:url");
 const { ApiError } = require("../utils/api-error");
+const scraperClient = require("../utils/scraper-client");
 
 const DEFAULT_DOMAIN = "jkanime.net";
 
@@ -11,10 +12,7 @@ function getProxyTargets(targetUrl, referer = null) {
   const rawList = [
     process.env.JKANIME_PROXY_URL,
     process.env.GLOBAL_PROXY_URL,
-    process.env.ANIMED23_PROXY_URL,
     process.env.FALLBACK_PROXY_URL,
-    process.env.SCRAPINGANT_PROXY_URL,
-    "https://api.scrapingant.com/v2/general?x-api-key=80a18b4471cd4ec6be4426668aed321a&url=",
   ];
 
   for (const raw of rawList) {
@@ -27,11 +25,7 @@ function getProxyTargets(targetUrl, referer = null) {
       : trimmed;
     const separator = cleanBase.includes("?") ? "&" : "?";
     let target = `${cleanBase}${separator}url=${encodeURIComponent(targetUrl)}`;
-    if (
-      referer &&
-      !trimmed.includes("scraperapi") &&
-      !trimmed.includes("scrapingant")
-    ) {
+    if (referer && !trimmed.includes("scraperapi") && !trimmed.includes("scrapingant")) {
       target += `&referer=${encodeURIComponent(referer)}`;
     }
 
@@ -43,61 +37,28 @@ function getProxyTargets(targetUrl, referer = null) {
   return targets;
 }
 
-const SCRAPER_USER_AGENTS = [
-  "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-  "Twitterbot/1.0",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-];
-
-async function fetchHtml(url, referer = null) {
+async function fetchHtml(url, referer = null, useCache = false) {
   const timeout = Number(
-    process.env.JKANIME_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 25000
+    process.env.JKANIME_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 15000
   );
   let lastError = null;
 
-  // Step 1: Direct request with rotating User-Agents (Fast & Free)
-  for (const ua of SCRAPER_USER_AGENTS) {
-    try {
-      const headers = {
-        "User-Agent": ua,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Upgrade-Insecure-Requests": "1",
-        ...(referer ? { Referer: referer } : {}),
-      };
-
-      const response = await axios.get(url, {
-        timeout: Math.min(timeout, 8000),
-        headers,
-        maxRedirects: 5,
-        validateStatus: (status) => status >= 200 && status < 400,
-      });
-
-      if (
-        typeof response.data === "string" &&
-        response.data.length > 200 &&
-        !response.data.includes("Just a moment...") &&
-        !response.data.includes("cf-browser-verification") &&
-        !response.data.includes("Checking your browser")
-      ) {
-        return response.data;
-      }
-    } catch (err) {
-      lastError = err;
-    }
+  try {
+    return await scraperClient.fetchHtml(url, {
+      referer,
+      timeoutMs: timeout,
+      useCache,
+    });
+  } catch (err) {
+    lastError = err;
   }
 
-  // Step 2: Cascading Proxies fallback (Primary ScraperAPI -> Secondary ScrapingAnt)
+  // Fallback to configured proxy if any
   const proxyTargets = getProxyTargets(url, referer);
   for (const proxyTarget of proxyTargets) {
     try {
-      const proxyTimeout = proxyTarget.includes("scrapingant")
-        ? Math.max(timeout, 45000)
-        : timeout;
-
       const response = await axios.get(proxyTarget, {
-        timeout: proxyTimeout,
+        timeout: Math.min(timeout, 15000),
         headers: {
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
@@ -108,69 +69,36 @@ async function fetchHtml(url, referer = null) {
         typeof response.data === "string" &&
         response.data.length > 200 &&
         !response.data.includes("Just a moment...") &&
-        !response.data.includes("cf-browser-verification") &&
-        !response.data.includes("Checking your browser")
+        !response.data.includes("cf-browser-verification")
       ) {
         return response.data;
       }
     } catch (proxyError) {
-      console.warn(
-        `[JKAnime Proxy Fallback]: Proxy failed (${proxyError.message}, status ${proxyError.response?.status}). Trying next proxy...`
-      );
       lastError = proxyError;
     }
-  }
-
-  // Step 3: Native globalThis.fetch fallback (HTTP/2)
-  try {
-    const fetchRes = await fetch(url, {
-      headers: {
-        "User-Agent": SCRAPER_USER_AGENTS[0],
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        ...(referer ? { Referer: referer } : {}),
-      },
-      signal: AbortSignal.timeout(8000),
-    });
-
-    if (fetchRes.ok) {
-      const text = await fetchRes.text();
-      if (text && !text.includes("Just a moment...")) {
-        return text;
-      }
-    }
-  } catch (fetchErr) {
-    lastError = fetchErr;
   }
 
   throw new ApiError(
     500,
     "No se pudo obtener contenido desde JKAnime",
-    lastError ? lastError.message : "Cloudflare challenge block"
+    lastError ? lastError.message : "Error al conectar con JKAnime"
   );
 }
 
 async function fetchJson(url, options = {}) {
   const timeout = Number(
-    process.env.JKANIME_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 20000
+    process.env.JKANIME_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 15000
   );
 
-  // Direct try first
   try {
-    const response = await axios({
-      url,
-      timeout: Math.min(timeout, 8000),
-      maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400,
-      headers: {
-        "User-Agent": SCRAPER_USER_AGENTS[0],
-        Accept: "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        ...(options.headers || {}),
-      },
+    const data = await scraperClient.fetchJson(url, {
+      referer: options.headers?.Referer,
+      timeoutMs: timeout,
       method: options.method || "GET",
-      data: options.data || undefined,
+      data: options.data,
+      headers: options.headers,
     });
-    return response.data;
+    if (data) return data;
   } catch (_directError) {}
 
   // Proxy try if available
@@ -179,7 +107,7 @@ async function fetchJson(url, options = {}) {
     try {
       const response = await axios({
         url: proxyTarget,
-        timeout,
+        timeout: Math.min(timeout, 15000),
         validateStatus: (status) => status >= 200 && status < 400,
         headers: {
           Accept: "application/json, text/javascript, */*; q=0.01",
@@ -905,7 +833,7 @@ async function getEpisodeLinks(urlCandidate, includeMegaRaw, excludeServersRaw) 
 async function getLatestEpisodes(domainCandidate) {
   const domain = (domainCandidate || DEFAULT_DOMAIN).toString().trim();
   const searchUrl = `https://${domain}/`;
-  const html = await fetchHtml(searchUrl);
+  const html = await fetchHtml(searchUrl, null, true);
 
   const $ = cheerio.load(html);
   const results = [];

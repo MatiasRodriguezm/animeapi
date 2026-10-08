@@ -2,6 +2,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const { URL } = require("node:url");
 const { ApiError } = require("../utils/api-error");
+const scraperClient = require("../utils/scraper-client");
 
 const DEFAULT_DOMAIN = "animed23.com";
 const MULTIPLAYER_DOMAIN = "animed23.online";
@@ -72,11 +73,7 @@ function getProxyTargets(targetUrl, referer = null) {
   const rawList = [
     process.env.ANIMED23_PROXY_URL,
     process.env.GLOBAL_PROXY_URL,
-    process.env.JKANIME_PROXY_URL,
     process.env.FALLBACK_PROXY_URL,
-    process.env.SCRAPINGANT_PROXY_URL,
-    "https://api.scrapingant.com/v2/general?x-api-key=80a18b4471cd4ec6be4426668aed321a&url=",
-    "https://proxy-anime.elsodaestacio.workers.dev/?url=",
   ];
 
   for (const raw of rawList) {
@@ -105,34 +102,30 @@ function getProxyTargets(targetUrl, referer = null) {
   return targets;
 }
 
-const SCRAPER_USER_AGENTS = [
-  "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-  "Twitterbot/1.0",
-  "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
-];
-
-async function fetchHtml(url, referer = null) {
+async function fetchHtml(url, referer = null, useCache = false) {
   const timeout = Number(
-    process.env.ANIMED23_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 25000
+    process.env.ANIMED23_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 15000
   );
-  let tier1Error = null;
   let lastError = null;
 
-  // Tier 1: Cascading Proxies (Primary e.g. ScraperAPI -> Secondary e.g. ScrapingAnt / Worker)
+  // Tier 1: High-performance scraper client (TLS impersonation + pure JS got-scraping + native fetch)
+  try {
+    return await scraperClient.fetchHtml(url, {
+      referer,
+      timeoutMs: timeout,
+      useCache,
+    });
+  } catch (err) {
+    lastError = err;
+  }
+
+  // Tier 2: Proxy fallback (if environment proxy is configured)
   const proxyTargets = getProxyTargets(url, referer);
   for (const proxyTarget of proxyTargets) {
     try {
-      const proxyTimeout = proxyTarget.includes("scrapingant")
-        ? Math.max(timeout, 45000)
-        : timeout;
-
       const response = await axios.get(proxyTarget, {
-        timeout: proxyTimeout,
+        timeout: Math.min(timeout, 15000),
         headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           ...(referer ? { Referer: referer } : {}),
         },
@@ -143,101 +136,27 @@ async function fetchHtml(url, referer = null) {
         typeof response.data === "string" &&
         response.data.length > 200 &&
         !response.data.includes("Just a moment...") &&
-        !response.data.includes("cf-browser-verification") &&
-        !response.data.includes("Checking your browser")
+        !response.data.includes("cf-browser-verification")
       ) {
         return response.data;
       }
-
-      tier1Error = new Error(
-        `Proxy returned unparseable content (length: ${response?.data?.length || 0})`
-      );
     } catch (proxyError) {
-      console.warn(
-        `[AnimeD23 Proxy Fallback]: Proxy failed (${proxyError.message}, status ${proxyError.response?.status}). Trying next proxy...`
-      );
-      tier1Error = proxyError;
+      lastError = proxyError;
     }
   }
 
-  // Tier 2: Direct request with rotating User-Agents (for local / unblocked environments)
-  for (const ua of SCRAPER_USER_AGENTS) {
+  // Tier 3: Puppeteer fallback if available and explicitly allowed
+  if (process.env.ENABLE_PUPPETEER_FALLBACK === "true") {
     try {
-      const headers = {
-        "User-Agent": ua,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Upgrade-Insecure-Requests": "1",
-      };
-      if (referer) {
-        headers.Referer = referer;
-      }
-
-      const response = await axios.get(url, {
-        timeout: 10000,
-        headers,
-        maxRedirects: 5,
-        validateStatus: (status) => status >= 200 && status < 400,
-      });
-
-      if (
-        typeof response.data === "string" &&
-        (response.data.includes("Just a moment...") ||
-          response.data.includes("cf-browser-verification") ||
-          response.data.includes("Checking your browser"))
-      ) {
-        continue;
-      }
-
-      if (typeof response.data === "string" && response.data.length > 200) {
-        return response.data;
-      }
-    } catch (error) {
-      lastError = error;
-    }
+      return await fetchHtmlWithPuppeteer(url, referer);
+    } catch (_puppeteerError) {}
   }
 
-  // Tier 3: Native globalThis.fetch (HTTP/2 with modern TLS ALPN)
-  try {
-    const fetchHeaders = {
-      "User-Agent": SCRAPER_USER_AGENTS[1],
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    };
-    if (referer) {
-      fetchHeaders.Referer = referer;
-    }
-
-    const fetchRes = await fetch(url, {
-      headers: fetchHeaders,
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (fetchRes.ok) {
-      const text = await fetchRes.text();
-      if (text && !text.includes("Just a moment...")) {
-        return text;
-      }
-    }
-  } catch (fetchErr) {
-    lastError = fetchErr;
-  }
-
-  // Tier 4: Puppeteer fallback if available in environment
-  try {
-    return await fetchHtmlWithPuppeteer(url, referer);
-  } catch (_puppeteerError) {
-    const failureReason = tier1Error
-      ? `Proxy: ${tier1Error.message}`
-      : lastError
-      ? lastError.message
-      : "Cloudflare challenge block";
-    console.error("[AnimeD23 Failed All Tiers]:", failureReason);
-    throw new ApiError(
-      500,
-      "No se pudo obtener contenido desde AnimeD23",
-      failureReason
-    );
-  }
+  throw new ApiError(
+    500,
+    "No se pudo obtener contenido desde AnimeD23",
+    lastError ? lastError.message : "Error al conectar con AnimeD23"
+  );
 }
 
 async function fetchContenedorHtml(containerId, refererUrl) {
@@ -870,7 +789,7 @@ async function getEpisodeLinks(urlCandidate, includeMega = true, excludeServers 
 async function getLatestEpisodes(domainCandidate) {
   const domain = (domainCandidate || DEFAULT_DOMAIN).toString().trim();
   const searchUrl = `https://${domain}/`;
-  const html = await fetchHtml(searchUrl);
+  const html = await fetchHtml(searchUrl, null, true);
 
   const $ = cheerio.load(html);
   const results = [];
