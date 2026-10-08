@@ -18,7 +18,7 @@ app.use(
   })
 );
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
 
 const downloadsDir = downloadService.getDownloadsDir();
