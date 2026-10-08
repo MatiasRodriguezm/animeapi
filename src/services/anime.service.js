@@ -239,9 +239,19 @@ async function getLatestEpisodes(domainCandidate) {
   throw new ApiError(502, "No se pudo completar la busqueda de ultimos episodios en proveedores");
 }
 
+async function parseClientHtml({ domain = "jkanime.net", type = "latest-episodes", html }) {
+  const provider = findProviderByDomain(domain) || PROVIDERS.find((p) => p.id === "jkanime");
+  if (provider && typeof provider.service.parseClientHtml === "function") {
+    return provider.service.parseClientHtml({ domain, type, html });
+  }
+
+  return jkanimeService.parseClientHtml({ domain, type, html });
+}
+
 module.exports = {
   searchAnime,
   getAnimeInfo,
   getEpisodeLinks,
   getLatestEpisodes,
+  parseClientHtml,
 };

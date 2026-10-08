@@ -60,6 +60,19 @@ router.get(
 );
 
 router.post(
+  "/parse",
+  asyncHandler(async (req, res) => {
+    const { domain = "jkanime.net", type = "latest-episodes", html } = req.body || {};
+    if (!html) {
+      throw new ApiError(400, "Se requiere el campo 'html' en el cuerpo de la peticion");
+    }
+
+    const response = await animeService.parseClientHtml({ domain, type, html });
+    res.status(200).json(response);
+  })
+);
+
+router.post(
   "/download",
   asyncHandler(async (req, res) => {
     const baseUrl = `${req.protocol}://${req.get("host")}`;
