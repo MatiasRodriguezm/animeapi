@@ -37,23 +37,73 @@ function getProxyTargets(targetUrl, referer = null) {
   return targets;
 }
 
+function getGoogleMirrorUrl(originalUrl) {
+  try {
+    const u = new URL(originalUrl);
+    const mirrorHost = u.hostname.replace(/\./g, "-") + ".translate.goog";
+    const sep = u.search ? "&" : "?";
+    return `https://${mirrorHost}${u.pathname}${u.search}${sep}_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es`;
+  } catch (_e) {
+    return originalUrl;
+  }
+}
+
+function cleanHtmlFromMirror(html) {
+  if (typeof html !== "string") return html;
+  return html
+    .replace(/https:\/\/[a-z0-9-]+\.translate\.goog/gi, "https://jkanime.net")
+    .replace(/[\?&]_x_tr_[a-z0-9_=-]+/gi, "");
+}
+
 async function fetchHtml(url, referer = null, useCache = false) {
   const timeout = Number(
     process.env.JKANIME_TIMEOUT_MS || process.env.REQUEST_TIMEOUT_MS || 15000
   );
   let lastError = null;
 
+  // Tier 1: Direct scraper client
   try {
-    return await scraperClient.fetchHtml(url, {
+    const content = await scraperClient.fetchHtml(url, {
       referer,
       timeoutMs: timeout,
       useCache,
     });
+    if (content && content.length > 500 && !content.includes("Just a moment...")) {
+      return content;
+    }
   } catch (err) {
     lastError = err;
   }
 
-  // Fallback to configured proxy if any
+  // Tier 2: Google Enterprise Edge Mirror (Bypasses Cloudflare Datacenter block reliably)
+  try {
+    const mirrorUrl = getGoogleMirrorUrl(url);
+    const mirrorRes = await fetch(mirrorUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+
+    if (mirrorRes.ok) {
+      const rawHtml = await mirrorRes.text();
+      if (
+        rawHtml &&
+        rawHtml.length > 500 &&
+        !rawHtml.includes("Just a moment...") &&
+        !rawHtml.includes("cf-browser-verification")
+      ) {
+        return cleanHtmlFromMirror(rawHtml);
+      }
+    }
+  } catch (mirrorErr) {
+    lastError = mirrorErr;
+  }
+
+  // Tier 3: Fallback to configured proxy if any
   const proxyTargets = getProxyTargets(url, referer);
   for (const proxyTarget of proxyTargets) {
     try {
@@ -893,10 +943,16 @@ async function getLatestEpisodes(domainCandidate) {
     $(".card.ml-2.mr-2 a, .row.mode1.autoimage a, .dir1 a").each((_, element) => {
       const a = $(element);
       const rawUrl = a.attr("href");
-      if (!rawUrl || !rawUrl.match(/\/\d+\/?$/)) return;
+      if (!rawUrl) return;
 
-      // Normalize URL
-      const fullUrl = rawUrl.startsWith("http") ? rawUrl : `https://${domain}${rawUrl}`;
+      const cleanUrl = rawUrl
+        .replace(/https:\/\/[^\/]+\.translate\.goog/gi, `https://${domain}`)
+        .split("?")[0]
+        .trim();
+
+      if (!cleanUrl.match(/\/\d+\/?$/)) return;
+
+      const fullUrl = cleanUrl.startsWith("http") ? cleanUrl : `https://${domain}${cleanUrl}`;
       const normalizedUrl = fullUrl.trim().replace(/\/+$/, "") + "/";
 
       const title = a.find("h5, .title, .card-title").text().trim() || a.text().trim();
