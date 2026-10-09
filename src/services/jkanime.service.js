@@ -830,59 +830,123 @@ async function getEpisodeLinks(urlCandidate, includeMegaRaw, excludeServersRaw) 
   };
 }
 
+async function getLatestEpisodesFromSitemap(domainCandidate) {
+  const domain = (domainCandidate || DEFAULT_DOMAIN).toString().trim();
+  const sitemapUrl = `https://${DEFAULT_DOMAIN}/sitemap-episodios.xml`;
+  try {
+    const res = await fetch(sitemapUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept: "text/xml,application/xml,application/xhtml+xml,*/*",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const xml = await res.text();
+    const matches = [...xml.matchAll(/<loc>https:\/\/jkanime\.net\/([^\/]+)\/(\d+)\/?<\/loc>/g)];
+    if (!matches || matches.length === 0) return null;
+
+    const results = [];
+    const seen = new Set();
+    for (const m of matches) {
+      const slug = m[1];
+      const episode = Number(m[2]);
+      const key = `${slug}-${episode}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const title = slug
+        .replace(/-/g, " ")
+        .replace(/\b\w/g, (char) => char.toUpperCase());
+
+      results.push({
+        id: null,
+        title,
+        episode,
+        slug,
+        url: `https://${domain && !domain.includes("force") ? domain : DEFAULT_DOMAIN}/${slug}/${episode}/`,
+        image: `https://cdn.jkdesa.com/assets/images/animes/image/${slug}.jpg`,
+      });
+    }
+
+    return {
+      success: true,
+      data: { results, count: results.length },
+      source: "jkanime",
+    };
+  } catch (_e) {
+    return null;
+  }
+}
+
 async function getLatestEpisodes(domainCandidate) {
   const domain = (domainCandidate || DEFAULT_DOMAIN).toString().trim();
   const searchUrl = `https://${domain}/`;
-  const html = await fetchHtml(searchUrl, null, true);
 
-  const $ = cheerio.load(html);
-  const results = [];
+  try {
+    const html = await fetchHtml(searchUrl, null, true);
 
-  // Target only the programming grid cards, ignoring hero banner/carousel
-  $(".card.ml-2.mr-2 a, .row.mode1.autoimage a, .dir1 a").each((_, element) => {
-    const a = $(element);
-    const rawUrl = a.attr("href");
-    if (!rawUrl || !rawUrl.match(/\/\d+\/?$/)) return;
+    const $ = cheerio.load(html);
+    const results = [];
 
-    // Normalize URL
-    const fullUrl = rawUrl.startsWith("http") ? rawUrl : `https://${domain}${rawUrl}`;
-    const normalizedUrl = fullUrl.trim().replace(/\/+$/, "") + "/";
+    // Target only the programming grid cards, ignoring hero banner/carousel
+    $(".card.ml-2.mr-2 a, .row.mode1.autoimage a, .dir1 a").each((_, element) => {
+      const a = $(element);
+      const rawUrl = a.attr("href");
+      if (!rawUrl || !rawUrl.match(/\/\d+\/?$/)) return;
 
-    const title = a.find("h5, .title, .card-title").text().trim() || a.text().trim();
-    if (!title || title === "Ver ahora") return;
+      // Normalize URL
+      const fullUrl = rawUrl.startsWith("http") ? rawUrl : `https://${domain}${rawUrl}`;
+      const normalizedUrl = fullUrl.trim().replace(/\/+$/, "") + "/";
 
-    const imgEl = a.find("img");
-    const image = imgEl.attr("src") || imgEl.attr("data-animepic") || imgEl.attr("data-src") || null;
+      const title = a.find("h5, .title, .card-title").text().trim() || a.text().trim();
+      if (!title || title === "Ver ahora") return;
 
-    const segments = new URL(normalizedUrl).pathname.split("/").filter(Boolean);
-    const slug = segments[segments.length - 2] || "";
-    const number = parseEpisodeNumberFromUrl(normalizedUrl);
+      const imgEl = a.find("img");
+      const image = imgEl.attr("src") || imgEl.attr("data-animepic") || imgEl.attr("data-src") || null;
 
-    results.push({
-      id: null,
-      title: title.replace(/\n/g, "").trim(),
-      episode: number,
-      slug,
-      url: normalizedUrl,
-      image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
+      const segments = new URL(normalizedUrl).pathname.split("/").filter(Boolean);
+      const slug = segments[segments.length - 2] || "";
+      const number = parseEpisodeNumberFromUrl(normalizedUrl);
+
+      results.push({
+        id: null,
+        title: title.replace(/\n/g, "").trim(),
+        episode: number,
+        slug,
+        url: normalizedUrl,
+        image: image ? (image.startsWith("http") ? image : `https://${domain}${image}`) : null,
+      });
     });
-  });
 
-  const seen = new Set();
-  const deduped = [];
-  for (const item of results) {
-    const key = `${item.slug}-${item.episode}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      deduped.push(item);
+    const seen = new Set();
+    const deduped = [];
+    for (const item of results) {
+      const key = `${item.slug}-${item.episode}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped.push(item);
+      }
     }
+
+    if (deduped.length > 0) {
+      return {
+        success: true,
+        data: { results: deduped, count: deduped.length },
+        source: "jkanime",
+      };
+    }
+  } catch (err) {
+    console.warn(`[JKAnime HTML Fetch]: ${err.message}. Intentando fallback por feed sitemap...`);
   }
 
-  return {
-    success: true,
-    data: { results: deduped, count: deduped.length },
-    source: "jkanime",
-  };
+  // Fallback: Sitemap feed (100% fiable en Render, sin bloqueos de reto HTML de Cloudflare)
+  const sitemapResult = await getLatestEpisodesFromSitemap(domain);
+  if (sitemapResult && sitemapResult.data.count > 0) {
+    return sitemapResult;
+  }
+
+  throw new ApiError(500, "No se pudo obtener contenido desde JKAnime");
 }
 
 module.exports = {
