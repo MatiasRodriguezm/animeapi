@@ -27,6 +27,13 @@ async function getGotScraping() {
 const cache = new Map();
 const DEFAULT_CACHE_TTL = 3 * 60 * 1000; // 3 minutes
 
+// Session cookies extracted from stealth solver (domain -> { cookieHeader, userAgent, updatedAt })
+const sessionCookies = new Map();
+const SESSION_COOKIE_TTL = 2 * 60 * 60 * 1000; // 2 hours
+
+// Concurrency mutex to prevent running multiple Puppeteer instances simultaneously
+let pendingSolverPromise = null;
+
 function isCloudflareBlock(text, status) {
   if (typeof text !== "string") return false;
   if (status === 403 || status === 503) {
@@ -63,13 +70,221 @@ const DEFAULT_HEADERS = {
   "Upgrade-Insecure-Requests": "1",
 };
 
+const SOCIAL_CRAWLER_UAS = [
+  "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+  "Twitterbot/1.0",
+];
+
 /**
- * Robust HTML fetcher with TLS emulation and fallback mechanisms
+ * Lightweight, RAM-optimized Puppeteer Stealth solver
+ * Launches only when direct HTTP requests encounter Cloudflare challenges.
+ * Aborts heavy media/fonts to stay well below Render's 512MB RAM cap.
+ */
+async function solveWithPuppeteerStealth(url, referer = null, timeoutMs = 25000) {
+  // If a solver is already running, wait for it instead of spawning parallel browsers
+  if (pendingSolverPromise) {
+    try {
+      await pendingSolverPromise;
+      // After waiting, check if session cookie is now available
+      const host = new URL(url).hostname;
+      if (sessionCookies.has(host)) {
+        // Try fast HTTP with newly resolved cookie
+        return await fetchHtmlFast(url, { referer, timeoutMs });
+      }
+    } catch (_e) {}
+  }
+
+  const solverTask = (async () => {
+    let browser = null;
+    try {
+      const puppeteer = require("puppeteer-extra");
+      const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+      puppeteer.use(StealthPlugin());
+
+      browser = await puppeteer.launch({
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+          "--disable-accelerated-2d-canvas",
+          "--no-first-run",
+          "--no-zygote",
+          "--single-process",
+        ],
+      });
+
+      const page = await browser.newPage();
+
+      // Intercept and cancel heavy assets to reduce RAM consumption to ~80MB
+      await page.setRequestInterception(true);
+      page.on("request", (req) => {
+        const type = req.resourceType();
+        if (["image", "media", "font"].includes(type)) {
+          req.abort();
+        } else {
+          req.continue();
+        }
+      });
+
+      if (referer) {
+        await page.setExtraHTTPHeaders({ Referer: referer });
+      }
+
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: timeoutMs,
+      });
+
+      // Poll until challenge resolves or timeout
+      let retries = 0;
+      let content = "";
+      while (retries < 6) {
+        content = await page.content();
+        if (
+          !content.includes("Just a moment...") &&
+          !content.includes("cf-browser-verification") &&
+          !content.includes("Checking your browser") &&
+          content.length > 500
+        ) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+        retries++;
+      }
+
+      // Save session cookies and user-agent for fast HTTP reuse
+      try {
+        const cookies = await page.cookies();
+        const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+        const ua = await page.evaluate(() => navigator.userAgent);
+        const host = new URL(url).hostname;
+
+        if (cookieHeader) {
+          sessionCookies.set(host, {
+            cookieHeader,
+            userAgent: ua,
+            updatedAt: Date.now(),
+          });
+        }
+      } catch (_e) {}
+
+      return content;
+    } finally {
+      if (browser) {
+        await browser.close().catch(() => {});
+      }
+    }
+  })();
+
+  pendingSolverPromise = solverTask;
+  try {
+    return await solverTask;
+  } finally {
+    pendingSolverPromise = null;
+  }
+}
+
+/**
+ * Fast HTTP request using stored cookies, TLS emulation, or social crawler bypass
+ */
+async function fetchHtmlFast(url, options = {}) {
+  const { referer = null, timeoutMs = 12000 } = options;
+  const host = new URL(url).hostname;
+  const session = sessionCookies.get(host);
+
+  const isSessionValid = session && Date.now() - session.updatedAt < SESSION_COOKIE_TTL;
+  const cookieHeader = isSessionValid ? session.cookieHeader : null;
+  const customUa = isSessionValid ? session.userAgent : null;
+
+  const baseHeaders = {
+    ...DEFAULT_HEADERS,
+    ...(customUa ? { "User-Agent": customUa } : {}),
+    ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+    ...(options.headers || {}),
+    ...(referer ? { Referer: referer } : {}),
+  };
+
+  // 1. Try with tls-client-node
+  if (tlsClientFetch) {
+    try {
+      const response = await tlsClientFetch(url, {
+        clientIdentifier: tlsClientIdentifier,
+        headers: baseHeaders,
+        timeoutSeconds: Math.ceil(timeoutMs / 1000),
+      });
+
+      const status = response.status;
+      const text = await response.text();
+
+      if (status >= 200 && status < 400 && !isCloudflareBlock(text, status)) {
+        if (text && text.length > 200) {
+          return text;
+        }
+      }
+    } catch (_err) {}
+  }
+
+  // 2. Try with got-scraping
+  try {
+    const gotScraping = await getGotScraping();
+    if (gotScraping) {
+      const response = await gotScraping.get(url, {
+        headers: baseHeaders,
+        timeout: { request: timeoutMs },
+        throwHttpErrors: false,
+      });
+
+      const status = response.statusCode;
+      const text = response.body;
+
+      if (status >= 200 && status < 400 && !isCloudflareBlock(text, status)) {
+        if (text && text.length > 200) {
+          return text;
+        }
+      }
+    }
+  } catch (_err) {}
+
+  // 3. Try social crawlers (Facebook, Twitter) which Cloudflare frequently exempts from Turnstile
+  for (const crawlerUa of SOCIAL_CRAWLER_UAS) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+
+      const crawlerHeaders = {
+        ...baseHeaders,
+        "User-Agent": crawlerUa,
+      };
+
+      const response = await fetch(url, {
+        headers: crawlerHeaders,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      const status = response.status;
+      const text = await response.text();
+
+      if (status >= 200 && status < 400 && !isCloudflareBlock(text, status)) {
+        if (text && text.length > 200) {
+          return text;
+        }
+      }
+    } catch (_err) {}
+  }
+
+  return null;
+}
+
+/**
+ * Master HTML fetcher with Cache -> Fast HTTP -> Puppeteer Stealth solver
  */
 async function fetchHtml(url, options = {}) {
   const {
     referer = null,
-    timeoutMs = 12000,
+    timeoutMs = 15000,
     useCache = false,
     cacheTtlMs = DEFAULT_CACHE_TTL,
   } = options;
@@ -82,109 +297,45 @@ async function fetchHtml(url, options = {}) {
     }
   }
 
-  const headers = {
-    ...DEFAULT_HEADERS,
-    ...(options.headers || {}),
-    ...(referer ? { Referer: referer } : {}),
-  };
-
-  let lastError = null;
-
-  // 1. Primary: tls-client-node (Emulates Chrome TLS fingerprint)
-  if (tlsClientFetch) {
-    try {
-      const response = await tlsClientFetch(url, {
-        clientIdentifier: tlsClientIdentifier,
-        headers,
-        timeoutSeconds: Math.ceil(timeoutMs / 1000),
-      });
-
-      const status = response.status;
-      const text = await response.text();
-
-      if (status >= 200 && status < 400 && !isCloudflareBlock(text, status)) {
-        if (text && text.length > 200) {
-          if (useCache) {
-            cache.set(cacheKey, { timestamp: Date.now(), data: text });
-          }
-          return text;
-        }
-      }
-      lastError = new Error(`tls-client returned status ${status} or challenge block`);
-    } catch (err) {
-      lastError = err;
-    }
-  }
-
-  // 2. Secondary: got-scraping (Pure JS HTTP/2 + Apify header generator)
+  // Step 1: Attempt fast HTTP (using cookies or TLS emulation)
   try {
-    const gotScraping = await getGotScraping();
-    if (gotScraping) {
-      const response = await gotScraping.get(url, {
-        headers,
-        timeout: { request: timeoutMs },
-        throwHttpErrors: false,
-      });
-
-      const status = response.statusCode;
-      const text = response.body;
-
-      if (status >= 200 && status < 400 && !isCloudflareBlock(text, status)) {
-        if (text && text.length > 200) {
-          if (useCache) {
-            cache.set(cacheKey, { timestamp: Date.now(), data: text });
-          }
-          return text;
-        }
+    const fastContent = await fetchHtmlFast(url, { referer, timeoutMs });
+    if (fastContent) {
+      if (useCache) {
+        cache.set(cacheKey, { timestamp: Date.now(), data: fastContent });
       }
-      lastError = new Error(`got-scraping returned status ${status} or challenge block`);
+      return fastContent;
     }
-  } catch (err) {
-    lastError = err;
-  }
+  } catch (_err) {}
 
-  // 3. Tertiary: Native Node fetch with browser headers
+  // Step 2: Fall back to internal Puppeteer Stealth solver
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    const response = await fetch(url, {
-      headers,
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-
-    const status = response.status;
-    const text = await response.text();
-
-    if (status >= 200 && status < 400 && !isCloudflareBlock(text, status)) {
-      if (text && text.length > 200) {
-        if (useCache) {
-          cache.set(cacheKey, { timestamp: Date.now(), data: text });
-        }
-        return text;
+    const stealthContent = await solveWithPuppeteerStealth(url, referer, 25000);
+    if (stealthContent && !isCloudflareBlock(stealthContent, 200) && stealthContent.length > 500) {
+      if (useCache) {
+        cache.set(cacheKey, { timestamp: Date.now(), data: stealthContent });
       }
+      return stealthContent;
     }
-    lastError = new Error(`Native fetch returned status ${status}`);
-  } catch (err) {
-    lastError = err;
+  } catch (stealthErr) {
+    console.warn(`[ScraperClient]: Stealth solver failed: ${stealthErr.message}`);
   }
 
-  // Return stale cache if available when all live requests fail
+  // Return stale cache if available
   if (cache.has(cacheKey)) {
-    console.warn(`[ScraperClient]: Returning stale cache for ${url} due to live fetch failure.`);
+    console.warn(`[ScraperClient]: Returning stale cache for ${url}.`);
     return cache.get(cacheKey).data;
   }
 
   throw new ApiError(
     500,
     `No se pudo obtener contenido desde ${new URL(url).hostname}`,
-    lastError ? lastError.message : "Error al conectar con la fuente"
+    "Error al conectar con la fuente tras agotar métodos internos"
   );
 }
 
 /**
- * Robust JSON fetcher with TLS emulation
+ * Master JSON fetcher
  */
 async function fetchJson(url, options = {}) {
   const {
@@ -194,9 +345,16 @@ async function fetchJson(url, options = {}) {
     data = null,
   } = options;
 
+  const host = new URL(url).hostname;
+  const session = sessionCookies.get(host);
+  const cookieHeader = session && Date.now() - session.updatedAt < SESSION_COOKIE_TTL
+    ? session.cookieHeader
+    : null;
+
   const headers = {
     ...DEFAULT_HEADERS,
     Accept: "application/json, text/javascript, */*; q=0.01",
+    ...(cookieHeader ? { Cookie: cookieHeader } : {}),
     ...(options.headers || {}),
     ...(referer ? { Referer: referer } : {}),
   };

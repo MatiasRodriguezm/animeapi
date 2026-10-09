@@ -31,6 +31,8 @@
     "morgan": "^1.10.0",
     "prompts": "^2.4.2",
     "puppeteer": "^24.43.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "tls-client-node": "^0.2.0",
     "unpacker": "^1.0.1"
   },
